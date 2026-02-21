@@ -1,7 +1,7 @@
 # Cargo.toml
 [package]
 name = "tplenv"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -9,4 +9,4 @@ clap = { version = "4.5", features = ["derive"] }
 regex = "1.10"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_yaml = "0.9"
+serde_yaml = "0.9.34"

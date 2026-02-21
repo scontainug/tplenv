@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{APP_NAME}}-config
+  namespace: {{NAMESPACE}}
+data:
+  LOG_LEVEL: {{ .Values.log.level }}
+  FEATURE_X_ENABLED: "{{ .Values.features.x_enabled }}"
+  API_BASE_URL: {{ .Values.api.base_url }}
+  CACHE_TTL_SECONDS: "{{ .Values.cache.ttl_seconds }}"

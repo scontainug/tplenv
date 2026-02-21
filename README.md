@@ -1,0 +1,107 @@
+# tplenv
+
+`tplenv` renders `{{...}}` placeholders in a template file.
+
+- `{{VARNAME}}` reads from environment variables.
+- `{{ .Values.key }}` reads from a YAML values file.
+
+## Install
+
+To install `tplenv` on your computer, just run:
+
+```bash
+cargo install --path .
+```
+
+## Building
+
+```bash
+cargo build --release
+```
+
+Binary path:
+
+```bash
+./target/release/tplenv
+```
+
+## Help
+
+Show CLI usage:
+
+```bash
+tplenv --help
+```
+
+## Usage
+
+```bash
+tplenv --file INPUT.yaml [--values Values.yaml] [--output OUTPUT.yaml]
+```
+
+Options:
+
+- `-f, --file <PATH>`: input template file (required)
+- `--values <PATH>`: values YAML file (default: `Values.yaml`)
+- `-o, --output <PATH>`: output file (`-` or omitted means stdout)
+- `-v, --verbose`: print substitutions to stderr
+- `--create-values-file`: ask for missing `.Values.*` placeholders and write/update the values file
+- `--force`: only valid with `--create-values-file`; asks for all `.Values.*` placeholders and uses existing values as prompt defaults
+- `-h, --help`: print help
+- `--version`: print version
+
+## Examples
+
+Render using environment variables and values file:
+
+```bash
+tplenv --file deployment.tpl.yaml --values Values.yaml --output deployment.yaml
+```
+
+Create/update only missing values in `Values.yaml`, then render:
+
+```bash
+tplenv --file deployment.tpl.yaml --create-values-file
+```
+
+Ask for all values found in the template and prefill from existing file values:
+
+```bash
+tplenv --file deployment.tpl.yaml --create-values-file --force
+```
+
+More runnable examples are in `examples/README.md`.
+
+## Tests
+
+Run unit tests:
+
+```bash
+cargo test
+```
+
+## Nix (Deterministic Build)
+
+This repo now includes a flake-based build:
+
+- `/Users/christoffetzer/Library/Mobile Documents/com~apple~CloudDocs/GIT/scontainug/tplenv/flake.nix`
+- `/Users/christoffetzer/Library/Mobile Documents/com~apple~CloudDocs/GIT/scontainug/tplenv/default.nix`
+
+Build with Nix:
+
+```bash
+nix build .#tplenv
+```
+
+Enter development shell:
+
+```bash
+nix develop
+```
+
+For deterministic builds across machines, commit `flake.lock` to the repo.
+If it does not exist yet, generate it once with:
+
+```bash
+nix flake lock
+```

@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{APP_NAME}}-db
+  namespace: {{NAMESPACE}}
+stringData:
+  host: {{ .Values.db.host }}
+  user: {{ .Values.db.user }}
+  password: {{ .Values.db.password }}
+  name: {{ .Values.db.name }}

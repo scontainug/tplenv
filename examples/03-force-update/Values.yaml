@@ -1,0 +1,5 @@
+db:
+  host: db.prod.internal
+  user: app_user
+  password: change-me
+  name: appdb

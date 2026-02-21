@@ -1,0 +1,7 @@
+replicas: 2
+environment: production
+image:
+  repository: nginx
+  tag: "1.27"
+service:
+  port: 8080
