@@ -1,0 +1,7 @@
+environment:
+  APP_NAME: values-driven-app
+  NAMESPACE: qa
+  APP_MODE: read-only
+service:
+  endpoint: https://api.example.internal
+  timeout_seconds: 15

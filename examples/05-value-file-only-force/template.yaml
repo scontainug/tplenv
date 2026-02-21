@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{APP_NAME}}-settings
+  namespace: {{NAMESPACE}}
+data:
+  mode: {{APP_MODE}}
+  region: {{REGION}}
+  image_repo: {{ .Values.image.repository }}
+  image_tag: {{ .Values.image.tag }}
+  replicas: "{{ .Values.replicas }}"

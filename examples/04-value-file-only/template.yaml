@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{APP_NAME}}-runtime
+  namespace: {{NAMESPACE}}
+data:
+  app_mode: {{APP_MODE}}
+  endpoint: {{ .Values.service.endpoint }}
+  timeout_seconds: "{{ .Values.service.timeout_seconds }}"
