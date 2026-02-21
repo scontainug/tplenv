@@ -3,6 +3,14 @@
 name = "tplenv"
 version = "0.3.0"
 edition = "2024"
+description = "Render template placeholders from environment variables and YAML values files"
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/scontainug/tplenv"
+homepage = "https://github.com/scontainug/tplenv"
+documentation = "https://docs.rs/tplenv"
+keywords = ["template", "yaml", "cli", "env", "kubernetes"]
+categories = ["command-line-utilities", "template-engine"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
