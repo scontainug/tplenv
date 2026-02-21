@@ -540,7 +540,7 @@ environment:
             resolve_env_from_values_file(&env_vars, &yaml).expect("env values resolve");
 
         assert_eq!(resolved.get("APP_NAME"), Some(&"api".to_string()));
-        assert!(resolved.get("NAMESPACE").is_none());
+        assert!(!resolved.contains_key("NAMESPACE"));
         assert_eq!(missing, vec!["environment.NAMESPACE".to_string()]);
     }
 }
