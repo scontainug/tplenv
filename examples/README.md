@@ -36,4 +36,34 @@ export NAMESPACE=prod
 cargo run -- --file examples/03-force-update/template.yaml --values examples/03-force-update/Values.yaml --create-values-file --force
 ```
 
+## 4) Value file only mode (no OS environment variables)
+
+`--value-file-only` resolves `{{VARNAME}}` from `environment.VARNAME` inside the values file.
+
+```bash
+cargo run -- --file examples/04-value-file-only/template.yaml --values examples/04-value-file-only/Values.yaml --value-file-only
+```
+
+Create or update missing values, including `environment.*` keys used by `{{VARNAME}}`:
+
+```bash
+cargo run -- --file examples/04-value-file-only/template.yaml --values examples/04-value-file-only/Values.yaml --value-file-only --create-values-file
+```
+
+## 5) Value file only + force (interactive with defaults)
+
+This values file already contains defaults. `--force` asks for every referenced key anyway, and pressing Enter keeps the default shown in brackets.
+
+```bash
+cargo run -- --file examples/05-value-file-only-force/template.yaml --values examples/05-value-file-only-force/Values.yaml --value-file-only --create-values-file --force
+```
+
+Typical prompts look like:
+
+```text
+Enter value for values file key environment.APP_NAME [default-app]:
+Enter value for values file key environment.NAMESPACE [default-ns]:
+Enter value for values file key image.tag [1.0.0]:
+```
+
 Tip: after running, open the values file to verify updates.

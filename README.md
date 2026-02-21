@@ -2,7 +2,7 @@
 
 `tplenv` renders `{{...}}` placeholders in a template file.
 
-- `{{VARNAME}}` reads from environment variables.
+- `{{VARNAME}}` reads from environment variables (or from `environment.VARNAME` with `--value-file-only`).
 - `{{ .Values.key }}` reads from a YAML values file.
 
 ## Install
@@ -36,7 +36,7 @@ tplenv --help
 ## Usage
 
 ```bash
-tplenv --file INPUT.yaml [--values Values.yaml] [--output OUTPUT.yaml]
+tplenv --file INPUT.yaml [--values Values.yaml] [--output OUTPUT.yaml] [--value-file-only]
 ```
 
 Options:
@@ -47,6 +47,7 @@ Options:
 - `-v, --verbose`: print substitutions to stderr
 - `--create-values-file`: ask for missing `.Values.*` placeholders and write/update the values file
 - `--force`: only valid with `--create-values-file`; asks for all `.Values.*` placeholders and uses existing values as prompt defaults
+- `--value-file-only`: resolve `{{VARNAME}}` from `environment.VARNAME` in the values file (do not read OS environment variables)
 - `-h, --help`: print help
 - `--version`: print version
 
@@ -70,7 +71,20 @@ Ask for all values found in the template and prefill from existing file values:
 tplenv --file deployment.tpl.yaml --create-values-file --force
 ```
 
+Resolve `{{VARNAME}}` from the values file:
+
+```bash
+tplenv --file deployment.tpl.yaml --values Values.yaml --value-file-only
+```
+
+With `--value-file-only`, interactive mode also manages missing `environment.*` keys:
+
+```bash
+tplenv --file deployment.tpl.yaml --values Values.yaml --value-file-only --create-values-file
+```
+
 More runnable examples are in `examples/README.md`.
+That includes a `--value-file-only --create-values-file --force` interactive example with defaults.
 
 ## Tests
 

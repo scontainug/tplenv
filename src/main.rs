@@ -42,6 +42,10 @@ struct Args {
     /// With --create-values-file, ask for all .Values paths (not only missing ones)
     #[arg(long = "force", default_value_t = false)]
     force: bool,
+
+    /// Resolve {{VAR}} from values file section environment.<VAR> (ignore OS env vars)
+    #[arg(long = "value-file-only", default_value_t = false)]
+    value_file_only: bool,
 }
 
 fn main() {
@@ -70,32 +74,59 @@ fn run() -> Result<()> {
         bail!("--force can only be used together with --create-values-file");
     }
 
-    if args.create_values_file && !values_paths.is_empty() {
-        prompt_and_update_values_file(&args.values, &values_paths, args.force, args.verbose)?;
+    let needs_values_prompt =
+        !values_paths.is_empty() || (args.value_file_only && !env_vars.is_empty());
+    if args.create_values_file && needs_values_prompt {
+        prompt_and_update_values_file(
+            &args.values,
+            &values_paths,
+            &env_vars,
+            args.value_file_only,
+            args.force,
+            args.verbose,
+        )?;
     }
 
     // Load values YAML only if we actually need it
-    let values_yaml: Option<YamlValue> = if values_paths.is_empty() {
+    let needs_values_yaml =
+        !values_paths.is_empty() || (args.value_file_only && !env_vars.is_empty());
+    let values_yaml: Option<YamlValue> = if !needs_values_yaml {
         None
     } else {
         load_values_yaml(&args.values)?
     };
 
-    // Resolve env vars
+    // Resolve placeholders
+    let mut missing_values: Vec<String> = Vec::new();
     let mut missing_env: Vec<String> = Vec::new();
     let mut env_map: HashMap<String, String> = HashMap::new();
-    for v in &env_vars {
-        match env::var_os(v) {
-            Some(os) => {
-                let val = os.to_string_lossy().to_string();
-                env_map.insert(v.clone(), val);
+    if args.value_file_only {
+        if !env_vars.is_empty() {
+            let yaml = values_yaml
+                .as_ref()
+                .expect("values_yaml must be loaded in --value-file-only mode");
+            let (resolved, missing_paths) = resolve_env_from_values_file(&env_vars, yaml)?;
+            env_map = resolved;
+
+            // Treat missing env substitutions as missing values file keys.
+            missing_env.clear();
+            for p in missing_paths {
+                missing_values.push(p);
             }
-            None => missing_env.push(v.clone()),
+        }
+    } else {
+        for v in &env_vars {
+            match env::var_os(v) {
+                Some(os) => {
+                    let val = os.to_string_lossy().to_string();
+                    env_map.insert(v.clone(), val);
+                }
+                None => missing_env.push(v.clone()),
+            }
         }
     }
 
     // Resolve values paths
-    let mut missing_values: Vec<String> = Vec::new();
     let mut values_map: HashMap<String, String> = HashMap::new();
     for p in &values_paths {
         let yaml = values_yaml
@@ -121,7 +152,11 @@ fn run() -> Result<()> {
         if !missing_values.is_empty() {
             eprintln!("Missing keys in values file ({}):", args.values.display());
             for p in &missing_values {
-                eprintln!("- .Values.{p}");
+                if p.starts_with("environment.") {
+                    eprintln!("- {p}");
+                } else {
+                    eprintln!("- .Values.{p}");
+                }
             }
         }
         bail!("not all placeholders could be resolved");
@@ -140,7 +175,11 @@ fn run() -> Result<()> {
             let key = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let val = env_map.get(key).cloned().unwrap_or_default();
             if args.verbose {
-                eprintln!("set env {key} = {val}");
+                if args.value_file_only {
+                    eprintln!("set environment.{key} = {val}");
+                } else {
+                    eprintln!("set env {key} = {val}");
+                }
             }
             val
         }
@@ -195,15 +234,18 @@ fn load_values_yaml_if_exists(path: &Path) -> Result<YamlValue> {
 fn prompt_and_update_values_file(
     path: &Path,
     values_paths: &BTreeSet<String>,
+    env_vars: &BTreeSet<String>,
+    include_environment_vars: bool,
     force: bool,
     verbose: bool,
 ) -> Result<()> {
     let mut root = load_values_yaml_if_exists(path)?;
 
+    let all_prompt_paths = collect_prompt_paths(values_paths, env_vars, include_environment_vars);
     let prompt_paths: Vec<String> = if force {
-        values_paths.iter().cloned().collect()
+        all_prompt_paths.iter().cloned().collect()
     } else {
-        values_paths
+        all_prompt_paths
             .iter()
             .filter(|p| lookup_yaml_path(&root, p).is_none())
             .cloned()
@@ -219,15 +261,15 @@ fn prompt_and_update_values_file(
 
     for p in prompt_paths {
         let default_value = lookup_yaml_path(&root, &p).cloned();
-        let chosen = prompt_for_yaml_value(&p, default_value.as_ref())?;
+        let chosen = prompt_for_yaml_key(&p, default_value.as_ref())?;
         set_yaml_path(&mut root, &p, chosen);
     }
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory: {}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
     }
 
     let out = serde_yaml::to_string(&root)?;
@@ -236,8 +278,46 @@ fn prompt_and_update_values_file(
     Ok(())
 }
 
-fn prompt_for_yaml_value(path: &str, default: Option<&YamlValue>) -> Result<YamlValue> {
-    let mut prompt = format!("Enter value for .Values.{path}");
+fn collect_prompt_paths(
+    values_paths: &BTreeSet<String>,
+    env_vars: &BTreeSet<String>,
+    include_environment_vars: bool,
+) -> BTreeSet<String> {
+    let mut all: BTreeSet<String> = values_paths.clone();
+    if include_environment_vars {
+        for var in env_vars {
+            all.insert(env_var_values_path(var));
+        }
+    }
+    all
+}
+
+fn env_var_values_path(var: &str) -> String {
+    format!("environment.{var}")
+}
+
+fn resolve_env_from_values_file(
+    env_vars: &BTreeSet<String>,
+    yaml: &YamlValue,
+) -> Result<(HashMap<String, String>, Vec<String>)> {
+    let mut env_map = HashMap::new();
+    let mut missing_paths = Vec::new();
+
+    for var in env_vars {
+        let path = env_var_values_path(var);
+        match lookup_yaml_path(yaml, &path) {
+            Some(v) => {
+                env_map.insert(var.clone(), yaml_value_to_string(v)?);
+            }
+            None => missing_paths.push(path),
+        }
+    }
+
+    Ok((env_map, missing_paths))
+}
+
+fn prompt_for_yaml_key(path: &str, default: Option<&YamlValue>) -> Result<YamlValue> {
+    let mut prompt = format!("Enter value for values file key {path}");
     if let Some(v) = default {
         let default_text = yaml_value_to_string(v)?;
         prompt.push_str(&format!(" [{default_text}]"));
@@ -418,5 +498,49 @@ spec:
         let mapping: YamlValue = serde_yaml::from_str("foo: bar\n").expect("valid map yaml");
         let rendered = yaml_value_to_string(&mapping).expect("mapping string");
         assert!(rendered.contains("foo: bar"));
+    }
+
+    #[test]
+    fn env_var_values_path_builds_expected_key() {
+        assert_eq!(env_var_values_path("NAMESPACE"), "environment.NAMESPACE");
+    }
+
+    #[test]
+    fn resolve_env_from_values_file_reads_environment_section() {
+        let yaml: YamlValue = serde_yaml::from_str(
+            r#"
+environment:
+  APP_NAME: api
+  NAMESPACE: prod
+"#,
+        )
+        .expect("valid yaml");
+        let env_vars = BTreeSet::from(["APP_NAME".to_string(), "NAMESPACE".to_string()]);
+
+        let (resolved, missing) =
+            resolve_env_from_values_file(&env_vars, &yaml).expect("env values resolve");
+
+        assert_eq!(resolved.get("APP_NAME"), Some(&"api".to_string()));
+        assert_eq!(resolved.get("NAMESPACE"), Some(&"prod".to_string()));
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn resolve_env_from_values_file_reports_missing_keys() {
+        let yaml: YamlValue = serde_yaml::from_str(
+            r#"
+environment:
+  APP_NAME: api
+"#,
+        )
+        .expect("valid yaml");
+        let env_vars = BTreeSet::from(["APP_NAME".to_string(), "NAMESPACE".to_string()]);
+
+        let (resolved, missing) =
+            resolve_env_from_values_file(&env_vars, &yaml).expect("env values resolve");
+
+        assert_eq!(resolved.get("APP_NAME"), Some(&"api".to_string()));
+        assert!(resolved.get("NAMESPACE").is_none());
+        assert_eq!(missing, vec!["environment.NAMESPACE".to_string()]);
     }
 }
