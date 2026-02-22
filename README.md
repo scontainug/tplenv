@@ -36,12 +36,13 @@ tplenv --help
 ## Usage
 
 ```bash
-tplenv --file INPUT.yaml [--values Values.yaml] [--output OUTPUT.yaml] [--value-file-only]
+tplenv (--file INPUT.yaml | --file-pattern "<NUM>-*.yaml") [--values Values.yaml] [--output OUTPUT.yaml] [--value-file-only]
 ```
 
 Options:
 
 - `-f, --file <PATH>`: input template file (required)
+- `--file-pattern <PATTERN>`: match multiple input files by filename pattern (supports `*` and `<NUM>`, e.g. `<NUM>-*.yaml`)
 - `--values <PATH>`: values YAML file (default: `Values.yaml`)
 - `-o, --output <PATH>`: output file (`-` or omitted means stdout)
 - `-v, --verbose`: print substitutions to stderr
@@ -50,6 +51,12 @@ Options:
 - `--value-file-only`: resolve `{{VARNAME}}` from `environment.VARNAME` in the values file (do not read OS environment variables)
 - `-h, --help`: print help
 - `--version`: print version
+
+Notes:
+
+- Use either `--file` or `--file-pattern`.
+- With multiple matched files, output is a YAML multi-document stream (`---` separators), to stdout or to `--output <FILE>`.
+- Multi-file mode fails unless all matched input files end with `.yaml`.
 
 ## Examples
 
@@ -81,6 +88,12 @@ With `--value-file-only`, interactive mode also manages missing `environment.*` 
 
 ```bash
 tplenv --file deployment.tpl.yaml --values Values.yaml --value-file-only --create-values-file
+```
+
+Process all numbered YAML files in a directory:
+
+```bash
+tplenv --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values examples/06-file-pattern/Values.yaml --value-file-only
 ```
 
 More runnable examples are in `examples/README.md`.

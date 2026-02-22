@@ -1,6 +1,6 @@
 // src/main.rs
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use regex::Regex;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::collections::{BTreeSet, HashMap};
@@ -17,11 +17,25 @@ use std::path::{Path, PathBuf};
 ///   {{ .Values.namespace }}    -> Values.yaml: namespace
 ///   {{ .Values.foo.bar }}      -> Values.yaml: foo: { bar: ... }
 #[derive(Parser, Debug)]
-#[command(name = "tplenv", version, about, disable_help_flag = false)]
+#[command(
+    name = "tplenv",
+    version,
+    about,
+    disable_help_flag = false,
+    group(
+        ArgGroup::new("input")
+            .required(true)
+            .args(["file", "file_pattern"])
+    )
+)]
 struct Args {
     /// Input file (e.g., a YAML manifest)
     #[arg(short = 'f', long = "file")]
-    file: PathBuf,
+    file: Option<PathBuf>,
+
+    /// Input filename pattern, e.g. "<NUM>-*.yaml"
+    #[arg(long = "file-pattern")]
+    file_pattern: Option<String>,
 
     /// YAML values file (default: Values.yaml)
     #[arg(long = "values", default_value = "Values.yaml")]
@@ -58,8 +72,17 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
 
-    let input = fs::read_to_string(&args.file)
-        .with_context(|| format!("failed to read file: {}", args.file.display()))?;
+    let input_files = discover_input_files(args.file.as_ref(), args.file_pattern.as_deref())?;
+    if input_files.len() > 1 {
+        ensure_all_yaml_files(&input_files)?;
+    }
+
+    let mut templates: Vec<(PathBuf, String)> = Vec::new();
+    for file in &input_files {
+        let input = fs::read_to_string(file)
+            .with_context(|| format!("failed to read file: {}", file.display()))?;
+        templates.push((file.clone(), input));
+    }
 
     // One regex to match both:
     //   {{NAMESPACE}}                         -> capture group 2
@@ -68,7 +91,7 @@ fn run() -> Result<()> {
     //
     // Values paths are dot-separated identifiers: foo.bar.baz
     let re = placeholder_regex()?;
-    let (env_vars, values_paths) = collect_placeholders(&input, &re);
+    let (env_vars, values_paths) = collect_placeholders_all(&templates, &re);
 
     if args.force && !args.create_values_file {
         bail!("--force can only be used together with --create-values-file");
@@ -163,29 +186,33 @@ fn run() -> Result<()> {
     }
 
     // Render with logging (if verbose)
-    let rendered = re.replace_all(&input, |caps: &regex::Captures| {
-        if let Some(p) = caps.get(1) {
-            let key = p.as_str();
-            let val = values_map.get(key).cloned().unwrap_or_default();
-            if args.verbose {
-                eprintln!("set .Values.{key} = {val}");
-            }
-            val
-        } else {
-            let key = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let val = env_map.get(key).cloned().unwrap_or_default();
-            if args.verbose {
-                if args.value_file_only {
-                    eprintln!("set environment.{key} = {val}");
-                } else {
-                    eprintln!("set env {key} = {val}");
+    let mut rendered_outputs: Vec<(PathBuf, String)> = Vec::new();
+    for (path, input) in &templates {
+        let rendered = re.replace_all(input, |caps: &regex::Captures| {
+            if let Some(p) = caps.get(1) {
+                let key = p.as_str();
+                let val = values_map.get(key).cloned().unwrap_or_default();
+                if args.verbose {
+                    eprintln!("set .Values.{key} = {val}");
                 }
+                val
+            } else {
+                let key = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                let val = env_map.get(key).cloned().unwrap_or_default();
+                if args.verbose {
+                    if args.value_file_only {
+                        eprintln!("set environment.{key} = {val}");
+                    } else {
+                        eprintln!("set env {key} = {val}");
+                    }
+                }
+                val
             }
-            val
-        }
-    });
+        });
+        rendered_outputs.push((path.clone(), rendered.to_string()));
+    }
 
-    write_output(args.output.as_ref(), rendered.as_bytes())?;
+    write_outputs(args.output.as_ref(), &rendered_outputs)?;
     Ok(())
 }
 
@@ -208,6 +235,77 @@ fn collect_placeholders(input: &str, re: &Regex) -> (BTreeSet<String>, BTreeSet<
     }
 
     (env_vars, values_paths)
+}
+
+fn collect_placeholders_all(
+    templates: &[(PathBuf, String)],
+    re: &Regex,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut env_vars: BTreeSet<String> = BTreeSet::new();
+    let mut values_paths: BTreeSet<String> = BTreeSet::new();
+
+    for (_, input) in templates {
+        let (env, values) = collect_placeholders(input, re);
+        env_vars.extend(env);
+        values_paths.extend(values);
+    }
+
+    (env_vars, values_paths)
+}
+
+fn discover_input_files(
+    file: Option<&PathBuf>,
+    file_pattern: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    match (file, file_pattern) {
+        (Some(path), None) => Ok(vec![path.clone()]),
+        (None, Some(pattern)) => find_files_by_pattern(pattern),
+        (Some(_), Some(_)) => bail!("use only one of --file or --file-pattern"),
+        (None, None) => bail!("one of --file or --file-pattern is required"),
+    }
+}
+
+fn find_files_by_pattern(pattern: &str) -> Result<Vec<PathBuf>> {
+    let pattern_path = Path::new(pattern);
+    let dir = match pattern_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let filename_pattern = pattern_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid --file-pattern: {pattern}"))?;
+    let re = file_pattern_regex(filename_pattern)?;
+
+    let mut files = Vec::new();
+    for entry in
+        fs::read_dir(&dir).with_context(|| format!("failed to read dir: {}", dir.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if re.is_match(&name) {
+            files.push(dir.join(name.as_ref()));
+        }
+    }
+
+    files.sort();
+    if files.is_empty() {
+        bail!("no files matched --file-pattern {pattern}");
+    }
+    Ok(files)
+}
+
+fn file_pattern_regex(pattern: &str) -> Result<Regex> {
+    let escaped = regex::escape(pattern);
+    let with_num = escaped.replace("<NUM>", "[0-9]+");
+    let final_pattern = with_num.replace(r"\*", ".*");
+    Ok(Regex::new(&format!("^{final_pattern}$"))?)
 }
 
 fn load_values_yaml(path: &Path) -> Result<Option<YamlValue>> {
@@ -422,6 +520,48 @@ fn write_output(output: Option<&PathBuf>, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn write_outputs(output: Option<&PathBuf>, rendered: &[(PathBuf, String)]) -> Result<()> {
+    if rendered.len() == 1 {
+        return write_output(output, rendered[0].1.as_bytes());
+    }
+
+    let merged = render_multi_document_yaml(rendered);
+    write_output(output, merged.as_bytes())
+}
+
+fn render_multi_document_yaml(rendered: &[(PathBuf, String)]) -> String {
+    let mut out = String::new();
+    for (idx, (_, content)) in rendered.iter().enumerate() {
+        if idx > 0 {
+            out.push_str("\n---\n");
+        }
+        out.push_str(content);
+        if !content.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn ensure_all_yaml_files(input_files: &[PathBuf]) -> Result<()> {
+    for path in input_files {
+        if !is_yaml_file(path) {
+            bail!(
+                "all input files must be *.yaml for multi-file output, but found {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_yaml_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.ends_with(".yaml"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,5 +682,43 @@ environment:
         assert_eq!(resolved.get("APP_NAME"), Some(&"api".to_string()));
         assert!(!resolved.contains_key("NAMESPACE"));
         assert_eq!(missing, vec!["environment.NAMESPACE".to_string()]);
+    }
+
+    #[test]
+    fn file_pattern_regex_supports_num_token_and_wildcard() {
+        let re = file_pattern_regex("<NUM>-*.yaml").expect("pattern compiles");
+        assert!(re.is_match("1-demo.yaml"));
+        assert!(re.is_match("42-x.yaml"));
+        assert!(!re.is_match("demo.yaml"));
+        assert!(!re.is_match("a-demo.yaml"));
+    }
+
+    #[test]
+    fn collect_prompt_paths_deduplicates_shared_keys() {
+        let values_paths = BTreeSet::from(["db.user".to_string()]);
+        let env_vars = BTreeSet::from(["APP_NAME".to_string(), "APP_NAME".to_string()]);
+
+        let all = collect_prompt_paths(&values_paths, &env_vars, true);
+
+        assert!(all.contains("db.user"));
+        assert!(all.contains("environment.APP_NAME"));
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn is_yaml_file_only_accepts_yaml_suffix() {
+        assert!(is_yaml_file(Path::new("1-a.yaml")));
+        assert!(!is_yaml_file(Path::new("1-a.yml")));
+        assert!(!is_yaml_file(Path::new("1-a.txt")));
+    }
+
+    #[test]
+    fn render_multi_document_yaml_uses_doc_separator() {
+        let rendered = vec![
+            (PathBuf::from("1-a.yaml"), "a: 1\n".to_string()),
+            (PathBuf::from("2-b.yaml"), "b: 2\n".to_string()),
+        ];
+        let out = render_multi_document_yaml(&rendered);
+        assert_eq!(out, "a: 1\n\n---\nb: 2\n");
     }
 }

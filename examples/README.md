@@ -66,4 +66,19 @@ Enter value for values file key environment.NAMESPACE [default-ns]:
 Enter value for values file key image.tag [1.0.0]:
 ```
 
+## 6) File pattern + shared values prompts across files
+
+This processes multiple files in one run. Prompts are deduplicated across all matched files because they share one values file.
+
+```bash
+cargo run -- --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values examples/06-file-pattern/Values.yaml --value-file-only --create-values-file --force
+```
+
+If two files use the same key (for example `{{APP_NAME}}`), that key is only prompted once.
+Rendered output is a YAML multi-document stream, so you can also write one combined file:
+
+```bash
+cargo run -- --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values examples/06-file-pattern/Values.yaml --value-file-only --output examples/06-file-pattern/rendered.yaml
+```
+
 Tip: after running, open the values file to verify updates.
