@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-demo-config
+  namespace: prod
+data:
+  log_level: info
+  region: us-east-1
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: multi-demo-db
+  namespace: prod
+stringData:
+  user: app
+  password: secret
+  region: us-east-1

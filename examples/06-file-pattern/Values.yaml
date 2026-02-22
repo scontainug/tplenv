@@ -1,0 +1,9 @@
+environment:
+  APP_NAME: multi-demo
+  NAMESPACE: prod
+  REGION: us-east-1
+log:
+  level: info
+db:
+  user: app
+  password: secret
