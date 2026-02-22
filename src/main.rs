@@ -20,8 +20,11 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "tplenv",
     version,
-    about,
+    about = "Fill placeholders in YAML templates using env vars and/or a values file",
+    long_about = "tplenv reads one or more template files and replaces placeholders:\n- {{VARNAME}} from environment variables\n- {{ .Values.key }} from a YAML values file\n\nYou can also run in values-only mode so {{VARNAME}} is read from environment.VARNAME in the values file.\n\nFile patterns:\n- --file-pattern matches files in one directory using * and <NUM>\n- matched files are processed in sorted filename order\n- output is one YAML multi-document stream (documents separated by ---)",
+    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n",
     disable_help_flag = false,
+    next_line_help = true,
     group(
         ArgGroup::new("input")
             .required(true)
@@ -29,35 +32,37 @@ use std::path::{Path, PathBuf};
     )
 )]
 struct Args {
-    /// Input file (e.g., a YAML manifest)
+    /// Single template file to render
     #[arg(short = 'f', long = "file")]
     file: Option<PathBuf>,
 
-    /// Input filename pattern, e.g. "<NUM>-*.yaml"
+    /// Render all files matching this pattern (supports * and <NUM>)
+    /// Output becomes one YAML multi-document stream.
     #[arg(long = "file-pattern")]
     file_pattern: Option<String>,
 
-    /// YAML values file (default: Values.yaml)
+    /// Values YAML file used for {{ .Values.* }} lookups
     #[arg(long = "values", default_value = "Values.yaml")]
     values: PathBuf,
 
-    /// Output file (defaults to stdout). Use "-" for stdout.
+    /// Output file path (default: stdout). Use "-" to force stdout.
+    /// With multiple input files, output becomes one YAML multi-document stream.
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
 
-    /// Verbose logging to stderr
+    /// Show each placeholder replacement while rendering
     #[arg(short = 'v', long = "verbose", default_value_t = false)]
     verbose: bool,
 
-    /// Ask for values and create/update the values file before rendering
+    /// Ask questions for missing values, then write/update the values file first
     #[arg(long = "create-values-file", default_value_t = false)]
     create_values_file: bool,
 
-    /// With --create-values-file, ask for all .Values paths (not only missing ones)
+    /// With --create-values-file: ask for all keys, even if already set
     #[arg(long = "force", default_value_t = false)]
     force: bool,
 
-    /// Resolve {{VAR}} from values file section environment.<VAR> (ignore OS env vars)
+    /// Do not read OS environment variables; use values file key environment.<VAR> for {{VAR}}
     #[arg(long = "value-file-only", default_value_t = false)]
     value_file_only: bool,
 }
