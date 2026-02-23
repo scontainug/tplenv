@@ -1,9 +1,9 @@
 environment:
-  APP_NAME: myapp
-  NAMESPACE: default-ns
-  APP_MODE: unsafe
-  REGION: eu-central-1
+  APP_NAME: '23'
+  NAMESPACE: '23'
+  APP_MODE: '32'
+  REGION: '23'
 image:
-  repository: ghcr.io/example/demo
-  tag: 1.0.0
-replicas: 2
+  repository: '23'
+  tag: '23'
+replicas: '23'

@@ -81,4 +81,19 @@ Rendered output is a YAML multi-document stream, so you can also write one combi
 cargo run -- --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values examples/06-file-pattern/Values.yaml --value-file-only --output examples/06-file-pattern/rendered.yaml
 ```
 
+## 7) Emit bash exports with --eval
+
+Use this when you want prompted values to become environment variables in your current shell.
+
+```bash
+eval "$(cargo run -- --file examples/05-value-file-only-force/template.yaml --values examples/05-value-file-only-force/Values.yaml --value-file-only --create-values-file --force --eval)"
+```
+
+This prints lines like:
+
+```text
+export APP_NAME='default-app'
+export IMAGE_TAG='1.0.0'
+```
+
 Tip: after running, open the values file to verify updates.

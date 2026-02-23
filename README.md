@@ -1,8 +1,8 @@
 # tplenv
 
-`tplenv` renders `{{...}}` placeholders in a template file.
+`tplenv` renders placeholders in template files.
 
-- `{{VARNAME}}` reads from environment variables (or from `environment.VARNAME` with `--value-file-only`).
+- `{{VARNAME}}`, `$VARNAME`, and `${VARNAME}` read from environment variables (or from `environment.VARNAME` with `--value-file-only`).
 - `{{ .Values.key }}` reads from a YAML values file.
 
 ## Install
@@ -49,6 +49,8 @@ Options:
 - `--create-values-file`: ask for missing `.Values.*` placeholders and write/update the values file
 - `--force`: only valid with `--create-values-file`; asks for all `.Values.*` placeholders and uses existing values as prompt defaults
 - `--value-file-only`: resolve `{{VARNAME}}` from `environment.VARNAME` in the values file (do not read OS environment variables)
+- `--eval`: only with `--create-values-file`; print prompted keys as bash `export` lines (useful with `eval "$( ... )"`)
+  - If `--output <FILE>` is also set, the rendered YAML is still written to that file while exports are printed to stdout.
 - `-h, --help`: print help
 - `--version`: print version
 
@@ -95,6 +97,14 @@ Process all numbered YAML files in a directory:
 ```bash
 tplenv --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values examples/06-file-pattern/Values.yaml --value-file-only
 ```
+
+Generate bash exports from prompted values:
+
+```bash
+eval "$(tplenv --file deployment.tpl.yaml --create-values-file --eval)"
+```
+
+With `--force`, all prompted keys are exported (for example `image.tag` -> `IMAGE_TAG`, `environment.APP_NAME` -> `APP_NAME`).
 
 More runnable examples are in `examples/README.md`.
 That includes a `--value-file-only --create-values-file --force` interactive example with defaults.

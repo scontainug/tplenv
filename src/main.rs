@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-/// Substitute {{VARNAME}} placeholders using environment variables,
+/// Substitute env placeholders using environment variables (`{{VARNAME}}`, `$VARNAME`, `${VARNAME}`),
 /// and {{ .Values.key }} placeholders using a YAML values file (default: Values.yaml).
 ///
 /// Examples:
@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
     name = "tplenv",
     version,
     about = "Fill placeholders in YAML templates using env vars and/or a values file",
-    long_about = "tplenv reads one or more template files and replaces placeholders:\n- {{VARNAME}} from environment variables\n- {{ .Values.key }} from a YAML values file\n\nYou can also run in values-only mode so {{VARNAME}} is read from environment.VARNAME in the values file.\n\nFile patterns:\n- --file-pattern matches files in one directory using * and <NUM>\n- matched files are processed in sorted filename order\n- output is one YAML multi-document stream (documents separated by ---)",
-    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n",
+    long_about = "tplenv reads one or more template files and replaces placeholders:\n- {{VARNAME}}, $VARNAME, ${VARNAME} from environment variables\n- {{ .Values.key }} from a YAML values file\n\nYou can also run in values-only mode so env placeholders are read from environment.VARNAME in the values file.\n\nFile patterns:\n- --file-pattern matches files in one directory using * and <NUM>\n- matched files are processed in sorted filename order\n- output is one YAML multi-document stream (documents separated by ---)\n\nEval mode:\n- --eval prints prompted values as bash export statements\n- designed for: eval \"$(tplenv ... --create-values-file --eval)\"",
+    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n  eval \"$(tplenv --file app.yaml --create-values-file --eval)\"\n",
     disable_help_flag = false,
     next_line_help = true,
     group(
@@ -41,7 +41,7 @@ struct Args {
     #[arg(long = "file-pattern")]
     file_pattern: Option<String>,
 
-    /// Values YAML file used for {{ .Values.* }} lookups
+    /// Values YAML file used for {{ .Values.* }} lookups and environment.* in --value-file-only mode
     #[arg(long = "values", default_value = "Values.yaml")]
     values: PathBuf,
 
@@ -62,9 +62,13 @@ struct Args {
     #[arg(long = "force", default_value_t = false)]
     force: bool,
 
-    /// Do not read OS environment variables; use values file key environment.<VAR> for {{VAR}}
+    /// Do not read OS environment variables; use values file key environment.<VAR> for env placeholders
     #[arg(long = "value-file-only", default_value_t = false)]
     value_file_only: bool,
+
+    /// Print prompted values as bash export statements (for use with eval "$( ... )")
+    #[arg(long = "eval", default_value_t = false)]
+    eval: bool,
 }
 
 fn main() {
@@ -89,10 +93,11 @@ fn run() -> Result<()> {
         templates.push((file.clone(), input));
     }
 
-    // One regex to match both:
-    //   {{NAMESPACE}}                         -> capture group 2
+    // One regex to match all supported placeholders:
     //   {{ .Values.namespace }}               -> capture group 1 (path)
-    //   {{.Values.foo.bar}} / extra spaces OK
+    //   {{NAMESPACE}}                         -> capture group 2
+    //   ${NAMESPACE}                          -> capture group 3
+    //   $NAMESPACE                            -> capture group 4
     //
     // Values paths are dot-separated identifiers: foo.bar.baz
     let re = placeholder_regex()?;
@@ -101,19 +106,25 @@ fn run() -> Result<()> {
     if args.force && !args.create_values_file {
         bail!("--force can only be used together with --create-values-file");
     }
+    if args.eval && !args.create_values_file {
+        bail!("--eval can only be used together with --create-values-file");
+    }
 
+    let include_environment_vars_in_prompts = args.value_file_only || args.eval;
     let needs_values_prompt =
-        !values_paths.is_empty() || (args.value_file_only && !env_vars.is_empty());
+        !values_paths.is_empty() || (include_environment_vars_in_prompts && !env_vars.is_empty());
+    let mut prompted_values: Vec<(String, String)> = Vec::new();
     if args.create_values_file && needs_values_prompt {
-        prompt_and_update_values_file(
+        prompted_values = prompt_and_update_values_file(
             &args.values,
             &values_paths,
             &env_vars,
-            args.value_file_only,
+            include_environment_vars_in_prompts,
             args.force,
             args.verbose,
         )?;
     }
+    let prompted_env_map = prompted_environment_values(&prompted_values);
 
     // Load values YAML only if we actually need it
     let needs_values_yaml =
@@ -144,6 +155,10 @@ fn run() -> Result<()> {
         }
     } else {
         for v in &env_vars {
+            if let Some(val) = prompted_env_map.get(v) {
+                env_map.insert(v.clone(), val.clone());
+                continue;
+            }
             match env::var_os(v) {
                 Some(os) => {
                     let val = os.to_string_lossy().to_string();
@@ -201,29 +216,48 @@ fn run() -> Result<()> {
                     eprintln!("set .Values.{key} = {val}");
                 }
                 val
-            } else {
-                let key = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-                let val = env_map.get(key).cloned().unwrap_or_default();
-                if args.verbose {
-                    if args.value_file_only {
-                        eprintln!("set environment.{key} = {val}");
-                    } else {
-                        eprintln!("set env {key} = {val}");
-                    }
+        } else {
+            let key = extract_env_key(caps).unwrap_or("");
+            let val = env_map.get(key).cloned().unwrap_or_default();
+            if args.verbose {
+                if args.value_file_only {
+                    eprintln!("set environment.{key} = {val}");
+                } else {
+                    eprintln!("set env {key} = {val}");
                 }
-                val
             }
-        });
+            val
+        }
+    });
         rendered_outputs.push((path.clone(), rendered.to_string()));
     }
 
-    write_outputs(args.output.as_ref(), &rendered_outputs)?;
+    if args.eval {
+        // In eval mode, stdout should stay parseable as shell exports.
+        if args.output.is_some()
+            && args
+                .output
+                .as_ref()
+                .map(|p| p.to_string_lossy() == "-")
+                .unwrap_or(false)
+        {
+            bail!("with --eval, --output - is not supported");
+        }
+        if args.output.is_some() {
+            write_outputs(args.output.as_ref(), &rendered_outputs)?;
+        }
+        let script = render_eval_exports(&prompted_values);
+        let mut out = io::stdout().lock();
+        out.write_all(script.as_bytes())?;
+    } else {
+        write_outputs(args.output.as_ref(), &rendered_outputs)?;
+    }
     Ok(())
 }
 
 fn placeholder_regex() -> Result<Regex> {
     Ok(Regex::new(
-        r"\{\{\s*(?:\.Values\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)|([A-Za-z_][A-Za-z0-9_]*))\s*\}\}",
+        r"\{\{\s*(?:\.Values\.([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)|([A-Za-z_][A-Za-z0-9_]*))\s*\}\}|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
     )?)
 }
 
@@ -234,12 +268,19 @@ fn collect_placeholders(input: &str, re: &Regex) -> (BTreeSet<String>, BTreeSet<
     for cap in re.captures_iter(input) {
         if let Some(p) = cap.get(1) {
             values_paths.insert(p.as_str().to_string());
-        } else if let Some(v) = cap.get(2) {
-            env_vars.insert(v.as_str().to_string());
+        } else if let Some(v) = extract_env_key(&cap) {
+            env_vars.insert(v.to_string());
         }
     }
 
     (env_vars, values_paths)
+}
+
+fn extract_env_key<'a>(caps: &'a regex::Captures<'a>) -> Option<&'a str> {
+    caps.get(2)
+        .or_else(|| caps.get(3))
+        .or_else(|| caps.get(4))
+        .map(|m| m.as_str())
 }
 
 fn collect_placeholders_all(
@@ -341,8 +382,9 @@ fn prompt_and_update_values_file(
     include_environment_vars: bool,
     force: bool,
     verbose: bool,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     let mut root = load_values_yaml_if_exists(path)?;
+    let mut prompted_values: Vec<(String, String)> = Vec::new();
 
     let all_prompt_paths = collect_prompt_paths(values_paths, env_vars, include_environment_vars);
     let prompt_paths: Vec<String> = if force {
@@ -359,12 +401,14 @@ fn prompt_and_update_values_file(
         if verbose {
             eprintln!("No values to prompt for in {}", path.display());
         }
-        return Ok(());
+        return Ok(prompted_values);
     }
 
     for p in prompt_paths {
         let default_value = lookup_yaml_path(&root, &p).cloned();
         let chosen = prompt_for_yaml_key(&p, default_value.as_ref())?;
+        let chosen_text = yaml_value_to_string(&chosen)?;
+        prompted_values.push((p.clone(), chosen_text));
         set_yaml_path(&mut root, &p, chosen);
     }
 
@@ -378,7 +422,7 @@ fn prompt_and_update_values_file(
     let out = serde_yaml::to_string(&root)?;
     fs::write(path, out)
         .with_context(|| format!("failed to write values file: {}", path.display()))?;
-    Ok(())
+    Ok(prompted_values)
 }
 
 fn collect_prompt_paths(
@@ -397,6 +441,50 @@ fn collect_prompt_paths(
 
 fn env_var_values_path(var: &str) -> String {
     format!("environment.{var}")
+}
+
+fn values_key_to_env_var(values_key: &str) -> String {
+    let no_prefix = values_key
+        .strip_prefix("environment.")
+        .unwrap_or(values_key);
+    no_prefix.replace('.', "_").to_uppercase()
+}
+
+fn shell_escape_single_quoted(value: &str) -> String {
+    value.replace('\'', "'\"'\"'")
+}
+
+fn render_eval_exports(prompted_values: &[(String, String)]) -> String {
+    let mut env_map: HashMap<String, String> = HashMap::new();
+    for (key, value) in prompted_values {
+        let env_name = values_key_to_env_var(key);
+        env_map.insert(env_name, value.clone());
+    }
+
+    let mut names: Vec<String> = env_map.keys().cloned().collect();
+    names.sort();
+
+    let mut out = String::new();
+    for name in names {
+        if let Some(value) = env_map.get(&name) {
+            out.push_str(&format!(
+                "export {}='{}'\n",
+                name,
+                shell_escape_single_quoted(value)
+            ));
+        }
+    }
+    out
+}
+
+fn prompted_environment_values(prompted_values: &[(String, String)]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (key, value) in prompted_values {
+        if let Some(env_name) = key.strip_prefix("environment.") {
+            out.insert(env_name.to_string(), value.clone());
+        }
+    }
+    out
 }
 
 fn resolve_env_from_values_file(
@@ -427,8 +515,9 @@ fn prompt_for_yaml_key(path: &str, default: Option<&YamlValue>) -> Result<YamlVa
     }
     prompt.push_str(": ");
 
-    print!("{prompt}");
-    io::stdout().flush()?;
+    let mut err = io::stderr().lock();
+    err.write_all(prompt.as_bytes())?;
+    err.flush()?;
 
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
@@ -578,6 +667,8 @@ apiVersion: v1
 metadata:
   namespace: {{NAMESPACE}}
   name: {{ APP_NAME }}
+  short_env: $SHORT_ENV
+  brace_env: ${BRACE_ENV}
 spec:
   image: {{ .Values.image.repository }}:{{.Values.image.tag}}
   replicas: {{ .Values.replicas }}
@@ -588,7 +679,12 @@ spec:
 
         assert_eq!(
             env_vars,
-            BTreeSet::from(["APP_NAME".to_string(), "NAMESPACE".to_string()])
+            BTreeSet::from([
+                "APP_NAME".to_string(),
+                "BRACE_ENV".to_string(),
+                "NAMESPACE".to_string(),
+                "SHORT_ENV".to_string()
+            ])
         );
         assert_eq!(
             values_paths,
@@ -725,5 +821,49 @@ environment:
         ];
         let out = render_multi_document_yaml(&rendered);
         assert_eq!(out, "a: 1\n\n---\nb: 2\n");
+    }
+
+    #[test]
+    fn extract_env_key_supports_three_env_styles() {
+        let re = placeholder_regex().expect("regex compiles");
+
+        let c1 = re
+            .captures("{{NAMESPACE}}")
+            .expect("must capture handlebars env");
+        assert_eq!(extract_env_key(&c1), Some("NAMESPACE"));
+
+        let c2 = re.captures("${APP_NAME}").expect("must capture brace env");
+        assert_eq!(extract_env_key(&c2), Some("APP_NAME"));
+
+        let c3 = re.captures("$REGION").expect("must capture short env");
+        assert_eq!(extract_env_key(&c3), Some("REGION"));
+    }
+
+    #[test]
+    fn values_key_to_env_var_handles_environment_prefix_and_dots() {
+        assert_eq!(values_key_to_env_var("environment.APP_NAME"), "APP_NAME");
+        assert_eq!(values_key_to_env_var("image.tag"), "IMAGE_TAG");
+    }
+
+    #[test]
+    fn render_eval_exports_outputs_bash_exports() {
+        let prompted = vec![
+            ("environment.APP_NAME".to_string(), "demo-app".to_string()),
+            ("image.tag".to_string(), "1.2.3".to_string()),
+        ];
+        let out = render_eval_exports(&prompted);
+        assert!(out.contains("export APP_NAME='demo-app'"));
+        assert!(out.contains("export IMAGE_TAG='1.2.3'"));
+    }
+
+    #[test]
+    fn prompted_environment_values_only_keeps_environment_entries() {
+        let prompted = vec![
+            ("environment.IMAGE".to_string(), "nginx:1.2".to_string()),
+            ("db.user".to_string(), "app".to_string()),
+        ];
+        let out = prompted_environment_values(&prompted);
+        assert_eq!(out.get("IMAGE"), Some(&"nginx:1.2".to_string()));
+        assert!(!out.contains_key("DB_USER"));
     }
 }
