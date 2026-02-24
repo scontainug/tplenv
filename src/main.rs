@@ -42,7 +42,7 @@ struct Args {
     file_pattern: Option<String>,
 
     /// Values YAML file used for {{ .Values.* }} lookups and environment.* in --value-file-only mode
-    #[arg(long = "values", default_value = "Values.yaml")]
+    #[arg(long = "values-file", visible_alias = "values", default_value = "Values.yaml")]
     values: PathBuf,
 
     /// Output file path (default: stdout). Use "-" to force stdout.
@@ -54,7 +54,8 @@ struct Args {
     #[arg(short = 'v', long = "verbose", default_value_t = false)]
     verbose: bool,
 
-    /// Ask questions for missing values, then write/update the values file first
+    /// Ask questions for missing placeholders, then write/update the values file first
+    /// Env placeholders are stored under environment.<VAR>.
     #[arg(long = "create-values-file", default_value_t = false)]
     create_values_file: bool,
 
@@ -114,7 +115,7 @@ fn run() -> Result<()> {
         bail!("--eval can only be used together with --create-values-file");
     }
 
-    let include_environment_vars_in_prompts = args.value_file_only || args.eval;
+    let include_environment_vars_in_prompts = args.create_values_file;
     let needs_values_prompt =
         !values_paths.is_empty() || (include_environment_vars_in_prompts && !env_vars.is_empty());
     let mut prompted_values: Vec<(String, String)> = Vec::new();

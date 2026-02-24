@@ -36,17 +36,17 @@ tplenv --help
 ## Usage
 
 ```bash
-tplenv (--file INPUT.yaml | --file-pattern "<NUM>-*.yaml") [--values Values.yaml] [--output OUTPUT.yaml] [--value-file-only]
+tplenv (--file INPUT.yaml | --file-pattern "<NUM>-*.yaml") [--values-file Values.yaml] [--output OUTPUT.yaml] [--value-file-only]
 ```
 
 Options:
 
 - `-f, --file <PATH>`: input template file (required)
 - `--file-pattern <PATTERN>`: match multiple input files by filename pattern (supports `*` and `<NUM>`, e.g. `<NUM>-*.yaml`)
-- `--values <PATH>`: values YAML file (default: `Values.yaml`)
+- `--values-file <PATH>`: values YAML file (default: `Values.yaml`, alias: `--values`)
 - `-o, --output <PATH>`: output file (`-` or omitted means stdout)
 - `-v, --verbose`: print substitutions to stderr
-- `--create-values-file`: ask for missing `.Values.*` placeholders and write/update the values file
+- `--create-values-file`: ask for missing placeholders and write/update the values file (`$VAR`/`${VAR}` are stored as `environment.VAR`)
 - `--force`: only valid with `--create-values-file`; asks for all `.Values.*` placeholders and uses existing values as prompt defaults
 - `--value-file-only`: resolve `{{VARNAME}}` from `environment.VARNAME` in the values file (do not read OS environment variables)
 - `--eval`: only with `--create-values-file`; print prompted keys as bash `export` lines (useful with `eval "$( ... )"`)
@@ -66,7 +66,7 @@ Notes:
 Render using environment variables and values file:
 
 ```bash
-tplenv --file deployment.tpl.yaml --values Values.yaml --output deployment.yaml
+tplenv --file deployment.tpl.yaml --values-file Values.yaml --output deployment.yaml
 ```
 
 Create/update only missing values in `Values.yaml`, then render:
@@ -84,19 +84,19 @@ tplenv --file deployment.tpl.yaml --create-values-file --force
 Resolve `{{VARNAME}}` from the values file:
 
 ```bash
-tplenv --file deployment.tpl.yaml --values Values.yaml --value-file-only
+tplenv --file deployment.tpl.yaml --values-file Values.yaml --value-file-only
 ```
 
 With `--value-file-only`, interactive mode also manages missing `environment.*` keys:
 
 ```bash
-tplenv --file deployment.tpl.yaml --values Values.yaml --value-file-only --create-values-file
+tplenv --file deployment.tpl.yaml --values-file Values.yaml --value-file-only --create-values-file
 ```
 
 Process all numbered YAML files in a directory:
 
 ```bash
-tplenv --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values examples/06-file-pattern/Values.yaml --value-file-only
+tplenv --file-pattern "examples/06-file-pattern/<NUM>-*.yaml" --values-file examples/06-file-pattern/Values.yaml --value-file-only
 ```
 
 Generate bash exports from prompted values:
@@ -110,7 +110,7 @@ With `--force`, all prompted keys are exported (for example `image.tag` -> `IMAG
 Keep multiline values aligned:
 
 ```bash
-tplenv --file deployment.tpl.yaml --values Values.yaml --indent
+tplenv --file deployment.tpl.yaml --values-file Values.yaml --indent
 ```
 
 More runnable examples are in `examples/README.md`.
