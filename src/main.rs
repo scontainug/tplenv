@@ -42,7 +42,11 @@ struct Args {
     file_pattern: Option<String>,
 
     /// Values YAML file used for {{ .Values.* }} lookups and environment.* in --value-file-only mode
-    #[arg(long = "values-file", visible_alias = "values", default_value = "Values.yaml")]
+    #[arg(
+        long = "values-file",
+        visible_alias = "values",
+        default_value = "Values.yaml"
+    )]
     values: PathBuf,
 
     /// Output file path (default: stdout). Use "-" to force stdout.
@@ -116,6 +120,15 @@ fn run() -> Result<()> {
     }
 
     let include_environment_vars_in_prompts = args.create_values_file;
+    let existing_os_env_vars: BTreeSet<String> = if args.value_file_only {
+        BTreeSet::new()
+    } else {
+        env_vars
+            .iter()
+            .filter(|v| env::var_os(v).is_some())
+            .cloned()
+            .collect()
+    };
     let needs_values_prompt =
         !values_paths.is_empty() || (include_environment_vars_in_prompts && !env_vars.is_empty());
     let mut prompted_values: Vec<(String, String)> = Vec::new();
@@ -125,6 +138,7 @@ fn run() -> Result<()> {
             &values_paths,
             &env_vars,
             include_environment_vars_in_prompts,
+            &existing_os_env_vars,
             args.force,
             args.verbose,
         )?;
@@ -395,13 +409,20 @@ fn prompt_and_update_values_file(
     values_paths: &BTreeSet<String>,
     env_vars: &BTreeSet<String>,
     include_environment_vars: bool,
+    skip_existing_env_vars: &BTreeSet<String>,
     force: bool,
     verbose: bool,
 ) -> Result<Vec<(String, String)>> {
     let mut root = load_values_yaml_if_exists(path)?;
     let mut prompted_values: Vec<(String, String)> = Vec::new();
 
-    let all_prompt_paths = collect_prompt_paths(values_paths, env_vars, include_environment_vars);
+    let env_skip = if force {
+        BTreeSet::new()
+    } else {
+        skip_existing_env_vars.clone()
+    };
+    let all_prompt_paths =
+        collect_prompt_paths(values_paths, env_vars, include_environment_vars, &env_skip);
     let prompt_paths: Vec<String> = if force {
         all_prompt_paths.iter().cloned().collect()
     } else {
@@ -444,10 +465,14 @@ fn collect_prompt_paths(
     values_paths: &BTreeSet<String>,
     env_vars: &BTreeSet<String>,
     include_environment_vars: bool,
+    skip_existing_env_vars: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut all: BTreeSet<String> = values_paths.clone();
     if include_environment_vars {
         for var in env_vars {
+            if skip_existing_env_vars.contains(var) {
+                continue;
+            }
             all.insert(env_var_values_path(var));
         }
     }
@@ -913,12 +938,24 @@ environment:
     fn collect_prompt_paths_deduplicates_shared_keys() {
         let values_paths = BTreeSet::from(["db.user".to_string()]);
         let env_vars = BTreeSet::from(["APP_NAME".to_string(), "APP_NAME".to_string()]);
+        let skip = BTreeSet::new();
 
-        let all = collect_prompt_paths(&values_paths, &env_vars, true);
+        let all = collect_prompt_paths(&values_paths, &env_vars, true, &skip);
 
         assert!(all.contains("db.user"));
         assert!(all.contains("environment.APP_NAME"));
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn collect_prompt_paths_skips_existing_env_vars_without_force() {
+        let values_paths = BTreeSet::new();
+        let env_vars = BTreeSet::from(["IMAGE".to_string(), "SIGNER".to_string()]);
+        let skip = BTreeSet::from(["IMAGE".to_string()]);
+
+        let all = collect_prompt_paths(&values_paths, &env_vars, true, &skip);
+        assert!(!all.contains("environment.IMAGE"));
+        assert!(all.contains("environment.SIGNER"));
     }
 
     #[test]
