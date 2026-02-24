@@ -129,6 +129,14 @@ fn run() -> Result<()> {
             .cloned()
             .collect()
     };
+    let existing_os_env_values: HashMap<String, String> = if args.value_file_only {
+        HashMap::new()
+    } else {
+        env_vars
+            .iter()
+            .filter_map(|v| env::var_os(v).map(|os| (v.clone(), os.to_string_lossy().to_string())))
+            .collect()
+    };
     let needs_values_prompt =
         !values_paths.is_empty() || (include_environment_vars_in_prompts && !env_vars.is_empty());
     let mut prompted_values: Vec<(String, String)> = Vec::new();
@@ -139,6 +147,7 @@ fn run() -> Result<()> {
             &env_vars,
             include_environment_vars_in_prompts,
             &existing_os_env_vars,
+            &existing_os_env_values,
             args.force,
             args.verbose,
         )?;
@@ -410,11 +419,26 @@ fn prompt_and_update_values_file(
     env_vars: &BTreeSet<String>,
     include_environment_vars: bool,
     skip_existing_env_vars: &BTreeSet<String>,
+    existing_os_env_values: &HashMap<String, String>,
     force: bool,
     verbose: bool,
 ) -> Result<Vec<(String, String)>> {
     let mut root = load_values_yaml_if_exists(path)?;
     let mut prompted_values: Vec<(String, String)> = Vec::new();
+    let mut changed = false;
+
+    if include_environment_vars && !force {
+        for var in env_vars {
+            let path_key = env_var_values_path(var);
+            if lookup_yaml_path(&root, &path_key).is_none()
+                && let Some(val) = existing_os_env_values.get(var)
+            {
+                set_yaml_path(&mut root, &path_key, YamlValue::String(val.clone()));
+                prompted_values.push((path_key, val.clone()));
+                changed = true;
+            }
+        }
+    }
 
     let env_skip = if force {
         BTreeSet::new()
@@ -437,15 +461,18 @@ fn prompt_and_update_values_file(
         if verbose {
             eprintln!("No values to prompt for in {}", path.display());
         }
-        return Ok(prompted_values);
-    }
-
-    for p in prompt_paths {
-        let default_value = lookup_yaml_path(&root, &p).cloned();
-        let chosen = prompt_for_yaml_key(&p, default_value.as_ref())?;
-        let chosen_text = yaml_value_to_string(&chosen)?;
-        prompted_values.push((p.clone(), chosen_text));
-        set_yaml_path(&mut root, &p, chosen);
+        if !changed {
+            return Ok(prompted_values);
+        }
+    } else {
+        for p in prompt_paths {
+            let default_value = lookup_yaml_path(&root, &p).cloned();
+            let chosen = prompt_for_yaml_key(&p, default_value.as_ref())?;
+            let chosen_text = yaml_value_to_string(&chosen)?;
+            prompted_values.push((p.clone(), chosen_text));
+            set_yaml_path(&mut root, &p, chosen);
+            changed = true;
+        }
     }
 
     if let Some(parent) = path.parent()
@@ -455,9 +482,11 @@ fn prompt_and_update_values_file(
             .with_context(|| format!("failed to create directory: {}", parent.display()))?;
     }
 
-    let out = serde_yaml::to_string(&root)?;
-    fs::write(path, out)
-        .with_context(|| format!("failed to write values file: {}", path.display()))?;
+    if changed {
+        let out = serde_yaml::to_string(&root)?;
+        fs::write(path, out)
+            .with_context(|| format!("failed to write values file: {}", path.display()))?;
+    }
     Ok(prompted_values)
 }
 
