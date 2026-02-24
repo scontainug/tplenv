@@ -51,6 +51,7 @@ Options:
 - `--value-file-only`: resolve `{{VARNAME}}` from `environment.VARNAME` in the values file (do not read OS environment variables)
 - `--eval`: only with `--create-values-file`; print prompted keys as bash `export` lines (useful with `eval "$( ... )"`)
   - If `--output <FILE>` is also set, the rendered YAML is still written to that file while exports are printed to stdout.
+- `--indent`: when a replacement value contains multiple lines, continuation lines keep the same indentation as the placeholder line
 - `-h, --help`: print help
 - `--version`: print version
 
@@ -105,6 +106,12 @@ eval "$(tplenv --file deployment.tpl.yaml --create-values-file --eval)"
 ```
 
 With `--force`, all prompted keys are exported (for example `image.tag` -> `IMAGE_TAG`, `environment.APP_NAME` -> `APP_NAME`).
+
+Keep multiline values aligned:
+
+```bash
+tplenv --file deployment.tpl.yaml --values Values.yaml --indent
+```
 
 More runnable examples are in `examples/README.md`.
 That includes a `--value-file-only --create-values-file --force` interactive example with defaults.

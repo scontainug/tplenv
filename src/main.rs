@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
     version,
     about = "Fill placeholders in YAML templates using env vars and/or a values file",
     long_about = "tplenv reads one or more template files and replaces placeholders:\n- {{VARNAME}}, $VARNAME, ${VARNAME} from environment variables\n- {{ .Values.key }} from a YAML values file\n\nYou can also run in values-only mode so env placeholders are read from environment.VARNAME in the values file.\n\nFile patterns:\n- --file-pattern matches files in one directory using * and <NUM>\n- matched files are processed in sorted filename order\n- output is one YAML multi-document stream (documents separated by ---)\n\nEval mode:\n- --eval prints prompted values as bash export statements\n- designed for: eval \"$(tplenv ... --create-values-file --eval)\"",
-    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n  eval \"$(tplenv --file app.yaml --create-values-file --eval)\"\n",
+    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --indent\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n  eval \"$(tplenv --file app.yaml --create-values-file --eval)\"\n",
     disable_help_flag = false,
     next_line_help = true,
     group(
@@ -69,6 +69,10 @@ struct Args {
     /// Print prompted values as bash export statements (for use with eval "$( ... )")
     #[arg(long = "eval", default_value_t = false)]
     eval: bool,
+
+    /// Preserve indentation for multiline replacement values
+    #[arg(long = "indent", default_value_t = false)]
+    indent: bool,
 }
 
 fn main() {
@@ -209,26 +213,36 @@ fn run() -> Result<()> {
     let mut rendered_outputs: Vec<(PathBuf, String)> = Vec::new();
     for (path, input) in &templates {
         let rendered = re.replace_all(input, |caps: &regex::Captures| {
-            if let Some(p) = caps.get(1) {
+            let raw = if let Some(p) = caps.get(1) {
                 let key = p.as_str();
                 let val = values_map.get(key).cloned().unwrap_or_default();
                 if args.verbose {
                     eprintln!("set .Values.{key} = {val}");
                 }
                 val
-        } else {
-            let key = extract_env_key(caps).unwrap_or("");
-            let val = env_map.get(key).cloned().unwrap_or_default();
-            if args.verbose {
-                if args.value_file_only {
-                    eprintln!("set environment.{key} = {val}");
-                } else {
-                    eprintln!("set env {key} = {val}");
+            } else {
+                let key = extract_env_key(caps).unwrap_or("");
+                let val = env_map.get(key).cloned().unwrap_or_default();
+                if args.verbose {
+                    if args.value_file_only {
+                        eprintln!("set environment.{key} = {val}");
+                    } else {
+                        eprintln!("set env {key} = {val}");
+                    }
                 }
+                val
+            };
+
+            if args.indent {
+                if let Some(m) = caps.get(0) {
+                    indent_multiline_value(&raw, input, m.start())
+                } else {
+                    raw
+                }
+            } else {
+                raw
             }
-            val
-        }
-    });
+        });
         rendered_outputs.push((path.clone(), rendered.to_string()));
     }
 
@@ -482,6 +496,29 @@ fn prompted_environment_values(prompted_values: &[(String, String)]) -> HashMap<
     for (key, value) in prompted_values {
         if let Some(env_name) = key.strip_prefix("environment.") {
             out.insert(env_name.to_string(), value.clone());
+        }
+    }
+    out
+}
+
+fn indent_multiline_value(value: &str, input: &str, match_start: usize) -> String {
+    if !value.contains('\n') {
+        return value.to_string();
+    }
+
+    let line_start = input[..match_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let before_match = &input[line_start..match_start];
+    let indent: String = before_match
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+
+    let mut out = String::with_capacity(value.len() + indent.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if ch == '\n' && chars.peek().is_some() {
+            out.push_str(&indent);
         }
     }
     out
@@ -865,5 +902,17 @@ environment:
         let out = prompted_environment_values(&prompted);
         assert_eq!(out.get("IMAGE"), Some(&"nginx:1.2".to_string()));
         assert!(!out.contains_key("DB_USER"));
+    }
+
+    #[test]
+    fn indent_multiline_value_uses_placeholder_line_indent() {
+        let input = "data:\n  script: |\n    {{ .Values.script }}\n";
+        let match_start = input
+            .find("{{ .Values.script }}")
+            .expect("placeholder should exist");
+        let value = "echo first\necho second";
+
+        let out = indent_multiline_value(value, input, match_start);
+        assert_eq!(out, "echo first\n    echo second");
     }
 }

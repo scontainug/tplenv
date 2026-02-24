@@ -96,4 +96,18 @@ export APP_NAME='default-app'
 export IMAGE_TAG='1.0.0'
 ```
 
+## 8) Keep multiline values aligned with --indent
+
+This preserves indentation when a value spans multiple lines.
+
+```bash
+cargo run -- --file examples/07-indent/template.yaml --values examples/07-indent/Values.yaml --indent
+```
+
+You can write the rendered file too:
+
+```bash
+cargo run -- --file examples/07-indent/template.yaml --values examples/07-indent/Values.yaml --indent --output examples/07-indent/rendered.yaml
+```
+
 Tip: after running, open the values file to verify updates.
