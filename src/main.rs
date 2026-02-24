@@ -60,6 +60,7 @@ struct Args {
 
     /// Ask questions for missing placeholders, then write/update the values file first
     /// Env placeholders are stored under environment.<VAR>.
+    /// During this mode, environment.<VAR> in values file has priority over OS env vars.
     #[arg(long = "create-values-file", default_value_t = false)]
     create_values_file: bool,
 
@@ -155,8 +156,9 @@ fn run() -> Result<()> {
     let prompted_env_map = prompted_environment_values(&prompted_values);
 
     // Load values YAML only if we actually need it
-    let needs_values_yaml =
-        !values_paths.is_empty() || (args.value_file_only && !env_vars.is_empty());
+    let needs_values_yaml = !values_paths.is_empty()
+        || (args.value_file_only && !env_vars.is_empty())
+        || (args.create_values_file && !env_vars.is_empty());
     let values_yaml: Option<YamlValue> = if !needs_values_yaml {
         None
     } else {
@@ -183,6 +185,15 @@ fn run() -> Result<()> {
         }
     } else {
         for v in &env_vars {
+            if args.create_values_file
+                && let Some(yaml) = values_yaml.as_ref()
+            {
+                let path = env_var_values_path(v);
+                if let Some(val) = lookup_yaml_path(yaml, &path) {
+                    env_map.insert(v.clone(), yaml_value_to_string(val)?);
+                    continue;
+                }
+            }
             if let Some(val) = prompted_env_map.get(v) {
                 env_map.insert(v.clone(), val.clone());
                 continue;

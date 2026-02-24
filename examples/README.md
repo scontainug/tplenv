@@ -111,3 +111,11 @@ cargo run -- --file examples/07-indent/template.yaml --values examples/07-indent
 ```
 
 Tip: after running, open the values file to verify updates.
+
+## Validate all examples
+
+Run everything end-to-end and verify expected outputs:
+
+```bash
+./examples/check_examples.sh
+```
