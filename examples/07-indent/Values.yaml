@@ -1,0 +1,5 @@
+scripts:
+  startup: |
+    echo "boot"
+    echo "ready"
+    echo "done"

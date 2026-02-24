@@ -235,7 +235,7 @@ fn run() -> Result<()> {
 
             if args.indent {
                 if let Some(m) = caps.get(0) {
-                    indent_multiline_value(&raw, input, m.start())
+                    format_replacement_with_indent(&raw, input, m.start(), m.end())
                 } else {
                     raw
                 }
@@ -519,6 +519,83 @@ fn indent_multiline_value(value: &str, input: &str, match_start: usize) -> Strin
         out.push(ch);
         if ch == '\n' && chars.peek().is_some() {
             out.push_str(&indent);
+        }
+    }
+    out
+}
+
+fn format_replacement_with_indent(
+    value: &str,
+    input: &str,
+    match_start: usize,
+    match_end: usize,
+) -> String {
+    if !value.contains('\n') {
+        return value.to_string();
+    }
+
+    if should_use_yaml_block_scalar(input, match_start, match_end) {
+        format_as_yaml_block_scalar(value, input, match_start)
+    } else {
+        indent_multiline_value(value, input, match_start)
+    }
+}
+
+fn should_use_yaml_block_scalar(input: &str, match_start: usize, match_end: usize) -> bool {
+    let line_start = input[..match_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_end = input[match_end..]
+        .find('\n')
+        .map(|i| match_end + i)
+        .unwrap_or(input.len());
+
+    let prefix = &input[line_start..match_start];
+    let suffix = &input[match_end..line_end];
+    let prefix_trimmed = prefix.trim_end();
+    let suffix_trimmed = suffix.trim();
+
+    (prefix_trimmed.ends_with(':') || prefix_trimmed.ends_with('-')) && suffix_trimmed.is_empty()
+}
+
+fn format_as_yaml_block_scalar(value: &str, input: &str, match_start: usize) -> String {
+    let line_start = input[..match_start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line_prefix = &input[line_start..match_start];
+    let line_indent: String = line_prefix
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    let content_indent = format!("{line_indent}  ");
+
+    let indicator = if has_trailing_empty_lines(value) {
+        "|+"
+    } else {
+        "|"
+    };
+    let content = indent_every_line(value, &content_indent);
+    format!("{indicator}\n{content}")
+}
+
+fn has_trailing_empty_lines(value: &str) -> bool {
+    let mut trailing_newlines = 0usize;
+    for ch in value.chars().rev() {
+        if ch == '\n' {
+            trailing_newlines += 1;
+        } else {
+            break;
+        }
+    }
+    trailing_newlines > 1
+}
+
+fn indent_every_line(value: &str, indent: &str) -> String {
+    let mut out = String::new();
+    for part in value.split_inclusive('\n') {
+        if let Some(line) = part.strip_suffix('\n') {
+            out.push_str(indent);
+            out.push_str(line);
+            out.push('\n');
+        } else {
+            out.push_str(indent);
+            out.push_str(part);
         }
     }
     out
@@ -914,5 +991,64 @@ environment:
 
         let out = indent_multiline_value(value, input, match_start);
         assert_eq!(out, "echo first\n    echo second");
+    }
+
+    #[test]
+    fn format_replacement_with_indent_uses_yaml_block_scalar_for_inline_value() {
+        let input = "data:\n  script: {{ .Values.script }}\n";
+        let token = "{{ .Values.script }}";
+        let match_start = input.find(token).expect("placeholder should exist");
+        let match_end = match_start + token.len();
+        let value = "echo first\necho second";
+
+        let out = format_replacement_with_indent(value, input, match_start, match_end);
+        assert_eq!(out, "|\n    echo first\n    echo second");
+    }
+
+    #[test]
+    fn format_replacement_with_indent_uses_block_scalar_keep_for_trailing_empty_lines() {
+        let input = "data:\n  script: {{ .Values.script }}\n";
+        let token = "{{ .Values.script }}";
+        let match_start = input.find(token).expect("placeholder should exist");
+        let match_end = match_start + token.len();
+        let value = "echo first\n\n";
+
+        let out = format_replacement_with_indent(value, input, match_start, match_end);
+        assert_eq!(out, "|+\n    echo first\n    \n");
+    }
+
+    #[test]
+    fn indent_multiline_signer_in_yaml_list_items_stays_valid_yaml() {
+        let input = r#"name: kbs-certs
+version: "0.3.11"
+
+access_policy:
+    read:
+      - ANY
+    update:
+      - ${SIGNER}
+    create_sessions:
+      - ${SIGNER}
+"#;
+        let signer = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtestkeyline\n-----END PUBLIC KEY-----";
+        let re = placeholder_regex().expect("regex compiles");
+
+        let rendered = re.replace_all(input, |caps: &regex::Captures| {
+            if let Some(key) = extract_env_key(caps) {
+                if key == "SIGNER" {
+                    let m = caps.get(0).expect("full match present");
+                    return format_replacement_with_indent(signer, input, m.start(), m.end());
+                }
+            }
+            caps.get(0)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+        });
+
+        let rendered = rendered.to_string();
+        assert!(rendered.contains("- |\n        -----BEGIN PUBLIC KEY-----"));
+        assert_eq!(rendered.matches("- |").count(), 2);
+        let parsed: YamlValue = serde_yaml::from_str(&rendered).expect("rendered yaml is valid");
+        assert!(matches!(parsed, YamlValue::Mapping(_)));
     }
 }
