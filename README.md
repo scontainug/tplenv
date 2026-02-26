@@ -53,6 +53,9 @@ Options:
 - `--eval`: only with `--create-values-file`; print prompted keys as bash `export` lines (useful with `eval "$( ... )"`)
   - If `--output <FILE>` is also set, the rendered YAML is still written to that file while exports are printed to stdout.
 - `--indent`: when a replacement value contains multiple lines, tplenv emits YAML block scalars automatically (`|` or `|+` for trailing empty lines) and keeps indentation valid
+- `--context`: with `--create-values-file`, show context before each question
+  - default behavior prints only the line containing the variable
+  - with `--context`, tplenv prints the full paragraph if it contains only that variable; otherwise it prints the matching list entry (`- ...` or numbered item)
 - `-h, --help`: print help
 - `--version`: print version
 
@@ -149,4 +152,30 @@ If it does not exist yet, generate it once with:
 
 ```bash
 nix flake lock
+```
+
+## Shell Completion
+
+This repo includes completion files for Bash and Zsh:
+
+- `/Users/christoffetzer/Library/Mobile Documents/com~apple~CloudDocs/GIT/scontainug/tplenv/completions/tplenv.bash`
+- `/Users/christoffetzer/Library/Mobile Documents/com~apple~CloudDocs/GIT/scontainug/tplenv/completions/_tplenv`
+
+Install completion directly via `tplenv`:
+
+```bash
+tplenv --install-completion
+```
+
+Pick a shell explicitly:
+
+```bash
+tplenv --install-completion bash
+tplenv --install-completion zsh
+```
+
+Alternative helper script (same behavior):
+
+```bash
+./scripts/install-completion.sh
 ```

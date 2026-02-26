@@ -1,0 +1,21 @@
+#compdef tplenv
+
+_tplenv() {
+  _arguments -s -S \
+    '(-f --file)'{-f,--file}'[single template file to render]:file:_files' \
+    '--file-pattern[render all files matching this pattern]:pattern:_files' \
+    '--values-file[values YAML file path]:file:_files' \
+    '--values[alias for --values-file]:file:_files' \
+    '(-o --output)'{-o,--output}'[output file path]:file:_files' \
+    '(-v --verbose)'{-v,--verbose}'[show each placeholder replacement while rendering]' \
+    '--create-values-file[ask for missing placeholders and update values file]' \
+    '--force[with --create-values-file ask for all keys]' \
+    '--value-file-only[use values file environment.<VAR> for env placeholders]' \
+    '--eval[print prompted values as bash export statements]' \
+    '--indent[preserve indentation for multiline replacement values]' \
+    '--context[show template context before each create-values-file prompt]' \
+    '(-h --help)'{-h,--help}'[print help]' \
+    '(-V --version)'{-V,--version}'[print version]'
+}
+
+_tplenv "$@"

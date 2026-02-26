@@ -38,6 +38,29 @@ assert_contains() {
   fi
 }
 
+assert_prompt_order() {
+  local file="$1"
+  shift
+  local last=0
+  local needle line
+  for needle in "$@"; do
+    line="$(grep -nF -- "$needle" "$file" | head -n1 | cut -d: -f1)"
+    if [[ -z "$line" ]]; then
+      echo "Assertion failed: prompt '$needle' not found in $file" >&2
+      echo "--- $file ---" >&2
+      cat "$file" >&2
+      exit 1
+    fi
+    if (( line <= last )); then
+      echo "Assertion failed: prompt order incorrect for '$needle' in $file" >&2
+      echo "--- $file ---" >&2
+      cat "$file" >&2
+      exit 1
+    fi
+    last=$line
+  done
+}
+
 echo "Running examples in $EX_DIR"
 
 # 1) Basic render (env + values)
@@ -125,6 +148,33 @@ assert_contains "$WORK_DIR/out-07.yaml" "startup.sh: |"
 assert_contains "$WORK_DIR/out-07.yaml" "    echo \"boot\""
 assert_contains "$WORK_DIR/out-07.yaml" "    echo \"ready\""
 assert_contains "$WORK_DIR/out-07.yaml" "    echo \"done\""
+
+# 9) Context mode (shows list-entry context and prompts in file order)
+ctx_stdout="$WORK_DIR/context-stdout.txt"
+ctx_stderr="$WORK_DIR/context-stderr.txt"
+printf 'img-orig\nimg-dest\npull-secret\n5.9.0\ncas-ns\ncas-name\n--cvm\n--scone-enclave\n' | run_tplenv \
+  --file "$EX_DIR/08-context/environment-variables.md" \
+  --values-file "$EX_DIR/08-context/Values.yaml" \
+  --create-values-file \
+  --context \
+  --output "$WORK_DIR/out-08.md" >"$ctx_stdout" 2>"$ctx_stderr"
+
+assert_contains "$WORK_DIR/out-08.md" "stored: img-orig"
+assert_contains "$WORK_DIR/out-08.md" "Destination of the confidential container image: img-dest"
+assert_contains "$WORK_DIR/out-08.md" "set to --cvm"
+assert_contains "$EX_DIR/08-context/Values.yaml" "IMAGE_NAME: img-orig"
+assert_contains "$EX_DIR/08-context/Values.yaml" "SCONE_ENCLAVE: --scone-enclave"
+assert_contains "$ctx_stderr" "1. Original native conatainer image is stored: \${IMAGE_NAME}"
+assert_contains "$ctx_stderr" "8. In CVM mode, you can run using the nodes or Kata-Pods. Mainly, set to --scone-enclave: \${SCONE_ENCLAVE}"
+assert_prompt_order "$ctx_stderr" \
+  "Enter value for values file key environment.IMAGE_NAME:" \
+  "Enter value for values file key environment.DESTINATION_IMAGE_NAME:" \
+  "Enter value for values file key environment.IMAGE_PULL_SECRET_NAME:" \
+  "Enter value for values file key environment.SCONE_VERSION:" \
+  "Enter value for values file key environment.CAS_NAMESPACE:" \
+  "Enter value for values file key environment.CAS_NAME:" \
+  "Enter value for values file key environment.CVM_MODE:" \
+  "Enter value for values file key environment.SCONE_ENCLAVE:"
 
 echo ""
 echo "All examples passed."

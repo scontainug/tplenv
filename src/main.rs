@@ -9,6 +9,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+const BASH_COMPLETION: &str = include_str!("../completions/tplenv.bash");
+const ZSH_COMPLETION: &str = include_str!("../completions/_tplenv");
+
 /// Substitute env placeholders using environment variables (`{{VARNAME}}`, `$VARNAME`, `${VARNAME}`),
 /// and {{ .Values.key }} placeholders using a YAML values file (default: Values.yaml).
 ///
@@ -22,12 +25,11 @@ use std::path::{Path, PathBuf};
     version,
     about = "Fill placeholders in YAML templates using env vars and/or a values file",
     long_about = "tplenv reads one or more template files and replaces placeholders:\n- {{VARNAME}}, $VARNAME, ${VARNAME} from environment variables\n- {{ .Values.key }} from a YAML values file\n\nYou can also run in values-only mode so env placeholders are read from environment.VARNAME in the values file.\n\nFile patterns:\n- --file-pattern matches files in one directory using * and <NUM>\n- matched files are processed in sorted filename order\n- output is one YAML multi-document stream (documents separated by ---)\n\nEval mode:\n- --eval prints prompted values as bash export statements\n- designed for: eval \"$(tplenv ... --create-values-file --eval)\"",
-    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --indent\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n  eval \"$(tplenv --file app.yaml --create-values-file --eval)\"\n",
+    after_help = "Quick examples:\n  tplenv --file app.yaml --values Values.yaml\n  tplenv --file app.yaml --indent\n  tplenv --file app.yaml --create-values-file\n  tplenv --file app.yaml --value-file-only --create-values-file --force\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --values Values.yaml\n  tplenv --file-pattern \"configs/<NUM>-*.yaml\" --output rendered.yaml\n  eval \"$(tplenv --file app.yaml --create-values-file --eval)\"\n  tplenv --install-completion\n  tplenv --install-completion zsh\n",
     disable_help_flag = false,
     next_line_help = true,
     group(
         ArgGroup::new("input")
-            .required(true)
             .args(["file", "file_pattern"])
     )
 )]
@@ -79,6 +81,19 @@ struct Args {
     /// Preserve indentation for multiline replacement values
     #[arg(long = "indent", default_value_t = false)]
     indent: bool,
+
+    /// Show template context before each --create-values-file prompt
+    #[arg(long = "context", default_value_t = false)]
+    context: bool,
+
+    /// Install shell completion (auto, bash, or zsh)
+    #[arg(
+        long = "install-completion",
+        num_args = 0..=1,
+        default_missing_value = "auto",
+        value_name = "SHELL"
+    )]
+    install_completion: Option<String>,
 }
 
 fn main() {
@@ -90,6 +105,11 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
+
+    if let Some(shell_arg) = args.install_completion.as_deref() {
+        install_completion(shell_arg)?;
+        return Ok(());
+    }
 
     let input_files = discover_input_files(args.file.as_ref(), args.file_pattern.as_deref())?;
     if input_files.len() > 1 {
@@ -112,6 +132,8 @@ fn run() -> Result<()> {
     // Values paths are dot-separated identifiers: foo.bar.baz
     let re = placeholder_regex()?;
     let (env_vars, values_paths) = collect_placeholders_all(&templates, &re);
+    let prompt_contexts = collect_prompt_contexts(&templates, &re, args.context);
+    let prompt_order = collect_prompt_order(&templates, &re);
 
     if args.force && !args.create_values_file {
         bail!("--force can only be used together with --create-values-file");
@@ -149,6 +171,9 @@ fn run() -> Result<()> {
             include_environment_vars_in_prompts,
             &existing_os_env_vars,
             &existing_os_env_values,
+            &prompt_contexts,
+            &prompt_order,
+            args.context,
             args.force,
             args.verbose,
         )?;
@@ -431,6 +456,9 @@ fn prompt_and_update_values_file(
     include_environment_vars: bool,
     skip_existing_env_vars: &BTreeSet<String>,
     existing_os_env_values: &HashMap<String, String>,
+    prompt_contexts: &HashMap<String, String>,
+    prompt_order: &[String],
+    preserve_file_order: bool,
     force: bool,
     verbose: bool,
 ) -> Result<Vec<(String, String)>> {
@@ -458,7 +486,7 @@ fn prompt_and_update_values_file(
     };
     let all_prompt_paths =
         collect_prompt_paths(values_paths, env_vars, include_environment_vars, &env_skip);
-    let prompt_paths: Vec<String> = if force {
+    let mut prompt_paths: Vec<String> = if force {
         all_prompt_paths.iter().cloned().collect()
     } else {
         all_prompt_paths
@@ -467,6 +495,14 @@ fn prompt_and_update_values_file(
             .cloned()
             .collect()
     };
+    if preserve_file_order {
+        let rank: HashMap<&str, usize> = prompt_order
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (k.as_str(), i))
+            .collect();
+        prompt_paths.sort_by_key(|k| rank.get(k.as_str()).copied().unwrap_or(usize::MAX));
+    }
 
     if prompt_paths.is_empty() {
         if verbose {
@@ -478,7 +514,8 @@ fn prompt_and_update_values_file(
     } else {
         for p in prompt_paths {
             let default_value = lookup_yaml_path(&root, &p).cloned();
-            let chosen = prompt_for_yaml_key(&p, default_value.as_ref())?;
+            let context = prompt_contexts.get(&p).map(|s| s.as_str());
+            let chosen = prompt_for_yaml_key(&p, default_value.as_ref(), context)?;
             let chosen_text = yaml_value_to_string(&chosen)?;
             prompted_values.push((p.clone(), chosen_text));
             set_yaml_path(&mut root, &p, chosen);
@@ -517,6 +554,223 @@ fn collect_prompt_paths(
         }
     }
     all
+}
+
+fn collect_prompt_contexts(
+    templates: &[(PathBuf, String)],
+    re: &Regex,
+    extended_context: bool,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let include_file_header = templates.len() > 1;
+
+    for (path, input) in templates {
+        for cap in re.captures_iter(input) {
+            let key = if let Some(p) = cap.get(1) {
+                p.as_str().to_string()
+            } else if let Some(env) = extract_env_key(&cap) {
+                env_var_values_path(env)
+            } else {
+                continue;
+            };
+
+            if out.contains_key(&key) {
+                continue;
+            }
+
+            let mut text = extract_prompt_context(input, &cap, re, &key, extended_context);
+            if include_file_header {
+                text = format!("[{}]\n{}", path.display(), text);
+            }
+            out.insert(key, text);
+        }
+    }
+
+    out
+}
+
+fn collect_prompt_order(templates: &[(PathBuf, String)], re: &Regex) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for (_, input) in templates {
+        for cap in re.captures_iter(input) {
+            let key = if let Some(p) = cap.get(1) {
+                p.as_str().to_string()
+            } else if let Some(env) = extract_env_key(&cap) {
+                env_var_values_path(env)
+            } else {
+                continue;
+            };
+
+            if seen.insert(key.clone()) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
+fn extract_prompt_context(
+    input: &str,
+    caps: &regex::Captures,
+    re: &Regex,
+    key: &str,
+    extended_context: bool,
+) -> String {
+    let m = if let Some(m) = caps.get(0) {
+        m
+    } else {
+        return String::new();
+    };
+
+    let lines = line_ranges(input);
+    let line_idx = line_index_for_pos(&lines, m.start()).unwrap_or(0);
+    if !extended_context {
+        return trim_line_ending(&input[lines[line_idx].0..lines[line_idx].1]).to_string();
+    }
+
+    let (para_start, para_end) = paragraph_bounds(input, &lines, line_idx);
+    let para_text = &input[lines[para_start].0..lines[para_end].1];
+    let keys = collect_prompt_keys(para_text, re);
+    if keys.len() == 1 && keys.contains(key) {
+        return trim_surrounding_newlines(para_text).to_string();
+    }
+
+    if let Some((list_start, list_end)) =
+        list_entry_bounds(input, &lines, line_idx, para_start, para_end)
+    {
+        let text = &input[lines[list_start].0..lines[list_end].1];
+        return trim_surrounding_newlines(text).to_string();
+    }
+
+    trim_line_ending(&input[lines[line_idx].0..lines[line_idx].1]).to_string()
+}
+
+fn collect_prompt_keys(text: &str, re: &Regex) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for cap in re.captures_iter(text) {
+        if let Some(p) = cap.get(1) {
+            keys.insert(p.as_str().to_string());
+        } else if let Some(env) = extract_env_key(&cap) {
+            keys.insert(env_var_values_path(env));
+        }
+    }
+    keys
+}
+
+fn line_ranges(input: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (i, b) in input.bytes().enumerate() {
+        if b == b'\n' {
+            ranges.push((start, i + 1));
+            start = i + 1;
+        }
+    }
+    if start < input.len() {
+        ranges.push((start, input.len()));
+    }
+    if ranges.is_empty() {
+        ranges.push((0, 0));
+    }
+    ranges
+}
+
+fn line_index_for_pos(lines: &[(usize, usize)], pos: usize) -> Option<usize> {
+    lines.iter().position(|(s, e)| *s <= pos && pos < *e)
+}
+
+fn paragraph_bounds(input: &str, lines: &[(usize, usize)], line_idx: usize) -> (usize, usize) {
+    let mut start = line_idx;
+    while start > 0 {
+        let prev = trim_line_ending(&input[lines[start - 1].0..lines[start - 1].1]);
+        if prev.trim().is_empty() {
+            break;
+        }
+        start -= 1;
+    }
+
+    let mut end = line_idx;
+    while end + 1 < lines.len() {
+        let next = trim_line_ending(&input[lines[end + 1].0..lines[end + 1].1]);
+        if next.trim().is_empty() {
+            break;
+        }
+        end += 1;
+    }
+    (start, end)
+}
+
+fn is_list_item_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("- ") {
+        return true;
+    }
+
+    let mut chars = trimmed.chars().peekable();
+    let mut has_digit = false;
+    while let Some(c) = chars.peek().copied() {
+        if c.is_ascii_digit() {
+            has_digit = true;
+            chars.next();
+        } else {
+            break;
+        }
+    }
+    if !has_digit {
+        return false;
+    }
+    match chars.next() {
+        Some('.') | Some(')') => matches!(chars.next(), Some(' ')),
+        _ => false,
+    }
+}
+
+fn leading_spaces(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ').count()
+}
+
+fn list_entry_bounds(
+    input: &str,
+    lines: &[(usize, usize)],
+    line_idx: usize,
+    para_start: usize,
+    para_end: usize,
+) -> Option<(usize, usize)> {
+    let mut anchor = None;
+    for idx in (para_start..=line_idx).rev() {
+        let line = trim_line_ending(&input[lines[idx].0..lines[idx].1]);
+        if is_list_item_line(line) {
+            anchor = Some(idx);
+            break;
+        }
+    }
+    let anchor_idx = anchor?;
+    let anchor_line = trim_line_ending(&input[lines[anchor_idx].0..lines[anchor_idx].1]);
+    let anchor_indent = leading_spaces(anchor_line);
+
+    let mut end = para_end;
+    for idx in (anchor_idx + 1)..=para_end {
+        let line = trim_line_ending(&input[lines[idx].0..lines[idx].1]);
+        if line.trim().is_empty() {
+            end = idx.saturating_sub(1);
+            break;
+        }
+        if is_list_item_line(line) && leading_spaces(line) <= anchor_indent {
+            end = idx.saturating_sub(1);
+            break;
+        }
+    }
+    Some((anchor_idx, end))
+}
+
+fn trim_line_ending(line: &str) -> &str {
+    line.trim_end_matches(['\r', '\n'])
+}
+
+fn trim_surrounding_newlines(s: &str) -> &str {
+    s.trim_matches(['\r', '\n'])
 }
 
 fn env_var_values_path(var: &str) -> String {
@@ -687,7 +941,11 @@ fn resolve_env_from_values_file(
     Ok((env_map, missing_paths))
 }
 
-fn prompt_for_yaml_key(path: &str, default: Option<&YamlValue>) -> Result<YamlValue> {
+fn prompt_for_yaml_key(
+    path: &str,
+    default: Option<&YamlValue>,
+    context: Option<&str>,
+) -> Result<YamlValue> {
     let mut prompt = format!("Enter value for values file key {path}");
     if let Some(v) = default {
         let default_text = yaml_value_to_string(v)?;
@@ -696,6 +954,11 @@ fn prompt_for_yaml_key(path: &str, default: Option<&YamlValue>) -> Result<YamlVa
     prompt.push_str(": ");
 
     let mut err = io::stderr().lock();
+    if let Some(ctx) = context {
+        err.write_all(b"\n")?;
+        err.write_all(ctx.as_bytes())?;
+        err.write_all(b"\n")?;
+    }
     err.write_all(prompt.as_bytes())?;
     err.flush()?;
 
@@ -834,6 +1097,102 @@ fn is_yaml_file(path: &Path) -> bool {
         .and_then(|n| n.to_str())
         .map(|n| n.ends_with(".yaml"))
         .unwrap_or(false)
+}
+
+#[derive(Copy, Clone)]
+enum CompletionShell {
+    Bash,
+    Zsh,
+}
+
+fn install_completion(shell_arg: &str) -> Result<()> {
+    let shell = resolve_completion_shell(shell_arg)?;
+    let home = home_dir()?;
+
+    match shell {
+        CompletionShell::Bash => {
+            let data_home = env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/share"));
+            let target_dir = data_home.join("bash-completion/completions");
+            fs::create_dir_all(&target_dir)
+                .with_context(|| format!("failed to create {}", target_dir.display()))?;
+            let target = target_dir.join("tplenv");
+            fs::write(&target, BASH_COMPLETION)
+                .with_context(|| format!("failed to write {}", target.display()))?;
+            eprintln!("Installed bash completion: {}", target.display());
+            eprintln!("Open a new shell, or run: source {}", target.display());
+        }
+        CompletionShell::Zsh => {
+            let target_dir = home.join(".zsh/completions");
+            fs::create_dir_all(&target_dir)
+                .with_context(|| format!("failed to create {}", target_dir.display()))?;
+            let target = target_dir.join("_tplenv");
+            fs::write(&target, ZSH_COMPLETION)
+                .with_context(|| format!("failed to write {}", target.display()))?;
+
+            let zshrc = home.join(".zshrc");
+            ensure_line_in_file(&zshrc, "fpath=(~/.zsh/completions $fpath)")?;
+            ensure_line_in_file(&zshrc, "autoload -Uz compinit && compinit")?;
+
+            eprintln!("Installed zsh completion: {}", target.display());
+            eprintln!(
+                "Open a new shell, or run: fpath=(~/.zsh/completions $fpath); autoload -Uz compinit && compinit"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_completion_shell(shell_arg: &str) -> Result<CompletionShell> {
+    if shell_arg == "auto" {
+        let shell = env::var("SHELL").unwrap_or_default();
+        let base = Path::new(&shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        return match base {
+            "bash" => Ok(CompletionShell::Bash),
+            "zsh" => Ok(CompletionShell::Zsh),
+            _ => bail!(
+                "could not detect shell from SHELL={shell}; use --install-completion bash|zsh"
+            ),
+        };
+    }
+
+    match shell_arg {
+        "bash" => Ok(CompletionShell::Bash),
+        "zsh" => Ok(CompletionShell::Zsh),
+        _ => bail!("unsupported shell '{shell_arg}', expected bash or zsh"),
+    }
+}
+
+fn home_dir() -> Result<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set"))
+}
+
+fn ensure_line_in_file(path: &Path, line: &str) -> Result<()> {
+    let content = if path.exists() {
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    if content.lines().any(|l| l == line) {
+        return Ok(());
+    }
+
+    let mut updated = content;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(line);
+    updated.push('\n');
+
+    fs::write(path, updated).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -996,6 +1355,67 @@ environment:
         let all = collect_prompt_paths(&values_paths, &env_vars, true, &skip);
         assert!(!all.contains("environment.IMAGE"));
         assert!(all.contains("environment.SIGNER"));
+    }
+
+    #[test]
+    fn extract_prompt_context_defaults_to_single_line() {
+        let input = "image: ${IMAGE}\n";
+        let re = placeholder_regex().expect("regex compiles");
+        let cap = re.captures(input).expect("capture exists");
+        let got = extract_prompt_context(input, &cap, &re, "environment.IMAGE", false);
+        assert_eq!(got, "image: ${IMAGE}");
+    }
+
+    #[test]
+    fn extract_prompt_context_uses_paragraph_for_single_variable() {
+        let input = "title: ${IMAGE}\nnotes: hello\n\nother: x\n";
+        let re = placeholder_regex().expect("regex compiles");
+        let cap = re.captures(input).expect("capture exists");
+        let got = extract_prompt_context(input, &cap, &re, "environment.IMAGE", true);
+        assert_eq!(got, "title: ${IMAGE}\nnotes: hello");
+    }
+
+    #[test]
+    fn extract_prompt_context_uses_list_entry_when_paragraph_has_multiple_variables() {
+        let input = "items:\n  - user: ${A}\n    note: x\n  - user: ${B}\n";
+        let re = placeholder_regex().expect("regex compiles");
+        let cap = re
+            .captures_iter(input)
+            .nth(1)
+            .expect("second placeholder capture");
+        let got = extract_prompt_context(input, &cap, &re, "environment.B", true);
+        assert_eq!(got, "  - user: ${B}");
+    }
+
+    #[test]
+    fn collect_prompt_order_follows_file_occurrence() {
+        let templates = vec![(
+            PathBuf::from("a.yaml"),
+            "x: ${B}\ny: {{ .Values.alpha }}\nz: ${A}\n".to_string(),
+        )];
+        let re = placeholder_regex().expect("regex compiles");
+        let order = collect_prompt_order(&templates, &re);
+        assert_eq!(
+            order,
+            vec![
+                "environment.B".to_string(),
+                "alpha".to_string(),
+                "environment.A".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_completion_shell_parses_explicit_values() {
+        assert!(matches!(
+            resolve_completion_shell("bash").expect("bash shell"),
+            CompletionShell::Bash
+        ));
+        assert!(matches!(
+            resolve_completion_shell("zsh").expect("zsh shell"),
+            CompletionShell::Zsh
+        ));
+        assert!(resolve_completion_shell("fish").is_err());
     }
 
     #[test]
