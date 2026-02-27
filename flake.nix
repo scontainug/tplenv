@@ -25,7 +25,7 @@
         in {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "tplenv";
-            version = "0.3.0";
+            version = "0.8.0";
             src = ./.;
             cargoLock = {
               lockFile = ./Cargo.lock;

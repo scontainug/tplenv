@@ -62,7 +62,7 @@ struct Args {
 
     /// Ask questions for missing placeholders, then write/update the values file first
     /// Env placeholders are stored under environment.<VAR>.
-    /// During this mode, environment.<VAR> in values file has priority over OS env vars.
+    /// environment.<VAR> in values file has priority over OS env vars.
     #[arg(long = "create-values-file", default_value_t = false)]
     create_values_file: bool,
 
@@ -164,30 +164,29 @@ fn run() -> Result<()> {
         !values_paths.is_empty() || (include_environment_vars_in_prompts && !env_vars.is_empty());
     let mut prompted_values: Vec<(String, String)> = Vec::new();
     if args.create_values_file && needs_values_prompt {
-        prompted_values = prompt_and_update_values_file(
-            &args.values,
-            &values_paths,
-            &env_vars,
-            include_environment_vars_in_prompts,
-            &existing_os_env_vars,
-            &existing_os_env_values,
-            &prompt_contexts,
-            &prompt_order,
-            args.context,
-            args.force,
-            args.verbose,
-        )?;
+        let prompt_opts = PromptUpdateOptions {
+            include_environment_vars: include_environment_vars_in_prompts,
+            skip_existing_env_vars: &existing_os_env_vars,
+            existing_os_env_values: &existing_os_env_values,
+            prompt_contexts: &prompt_contexts,
+            prompt_order: &prompt_order,
+            force: args.force,
+            verbose: args.verbose,
+        };
+        prompted_values =
+            prompt_and_update_values_file(&args.values, &values_paths, &env_vars, &prompt_opts)?;
     }
     let prompted_env_map = prompted_environment_values(&prompted_values);
 
-    // Load values YAML only if we actually need it
-    let needs_values_yaml = !values_paths.is_empty()
-        || (args.value_file_only && !env_vars.is_empty())
-        || (args.create_values_file && !env_vars.is_empty());
-    let values_yaml: Option<YamlValue> = if !needs_values_yaml {
-        None
-    } else {
+    // Load values YAML:
+    // - required when .Values placeholders exist
+    // - optional (if exists) for env placeholder precedence via environment.<VAR>
+    let values_yaml: Option<YamlValue> = if !values_paths.is_empty() {
         load_values_yaml(&args.values)?
+    } else if !env_vars.is_empty() {
+        Some(load_values_yaml_if_exists(&args.values)?)
+    } else {
+        None
     };
 
     // Resolve placeholders
@@ -200,6 +199,18 @@ fn run() -> Result<()> {
                 .as_ref()
                 .expect("values_yaml must be loaded in --value-file-only mode");
             let (resolved, missing_paths) = resolve_env_from_values_file(&env_vars, yaml)?;
+            if args.verbose {
+                for (name, val) in &resolved {
+                    if let Some(os) = env::var_os(name) {
+                        let env_val = os.to_string_lossy().to_string();
+                        if env_val != *val {
+                            eprintln!(
+                                "warning: env {name} differs from values file environment.{name}; using values file value"
+                            );
+                        }
+                    }
+                }
+            }
             env_map = resolved;
 
             // Treat missing env substitutions as missing values file keys.
@@ -210,12 +221,21 @@ fn run() -> Result<()> {
         }
     } else {
         for v in &env_vars {
-            if args.create_values_file
-                && let Some(yaml) = values_yaml.as_ref()
-            {
+            let os_val = env::var_os(v).map(|os| os.to_string_lossy().to_string());
+
+            if let Some(yaml) = values_yaml.as_ref() {
                 let path = env_var_values_path(v);
                 if let Some(val) = lookup_yaml_path(yaml, &path) {
-                    env_map.insert(v.clone(), yaml_value_to_string(val)?);
+                    let values_val = yaml_value_to_string(val)?;
+                    if args.verbose
+                        && let Some(env_val) = os_val.as_ref()
+                        && env_val != &values_val
+                    {
+                        eprintln!(
+                            "warning: env {v} differs from values file {path}; using values file value"
+                        );
+                    }
+                    env_map.insert(v.clone(), values_val);
                     continue;
                 }
             }
@@ -223,12 +243,10 @@ fn run() -> Result<()> {
                 env_map.insert(v.clone(), val.clone());
                 continue;
             }
-            match env::var_os(v) {
-                Some(os) => {
-                    let val = os.to_string_lossy().to_string();
-                    env_map.insert(v.clone(), val);
-                }
-                None => missing_env.push(v.clone()),
+            if let Some(val) = os_val {
+                env_map.insert(v.clone(), val);
+            } else {
+                missing_env.push(v.clone());
             }
         }
     }
@@ -320,7 +338,7 @@ fn run() -> Result<()> {
         if args.output.is_some() {
             write_outputs(args.output.as_ref(), &rendered_outputs)?;
         }
-        let script = render_eval_exports(&prompted_values);
+        let script = render_eval_exports_with_env(&prompted_values, &env_map);
         let mut out = io::stdout().lock();
         out.write_all(script.as_bytes())?;
     } else {
@@ -453,24 +471,17 @@ fn prompt_and_update_values_file(
     path: &Path,
     values_paths: &BTreeSet<String>,
     env_vars: &BTreeSet<String>,
-    include_environment_vars: bool,
-    skip_existing_env_vars: &BTreeSet<String>,
-    existing_os_env_values: &HashMap<String, String>,
-    prompt_contexts: &HashMap<String, String>,
-    prompt_order: &[String],
-    preserve_file_order: bool,
-    force: bool,
-    verbose: bool,
+    opts: &PromptUpdateOptions<'_>,
 ) -> Result<Vec<(String, String)>> {
     let mut root = load_values_yaml_if_exists(path)?;
     let mut prompted_values: Vec<(String, String)> = Vec::new();
     let mut changed = false;
 
-    if include_environment_vars && !force {
+    if opts.include_environment_vars && !opts.force {
         for var in env_vars {
             let path_key = env_var_values_path(var);
             if lookup_yaml_path(&root, &path_key).is_none()
-                && let Some(val) = existing_os_env_values.get(var)
+                && let Some(val) = opts.existing_os_env_values.get(var)
             {
                 set_yaml_path(&mut root, &path_key, YamlValue::String(val.clone()));
                 prompted_values.push((path_key, val.clone()));
@@ -479,14 +490,18 @@ fn prompt_and_update_values_file(
         }
     }
 
-    let env_skip = if force {
+    let env_skip = if opts.force {
         BTreeSet::new()
     } else {
-        skip_existing_env_vars.clone()
+        opts.skip_existing_env_vars.clone()
     };
-    let all_prompt_paths =
-        collect_prompt_paths(values_paths, env_vars, include_environment_vars, &env_skip);
-    let mut prompt_paths: Vec<String> = if force {
+    let all_prompt_paths = collect_prompt_paths(
+        values_paths,
+        env_vars,
+        opts.include_environment_vars,
+        &env_skip,
+    );
+    let mut prompt_paths: Vec<String> = if opts.force {
         all_prompt_paths.iter().cloned().collect()
     } else {
         all_prompt_paths
@@ -495,17 +510,16 @@ fn prompt_and_update_values_file(
             .cloned()
             .collect()
     };
-    if preserve_file_order {
-        let rank: HashMap<&str, usize> = prompt_order
-            .iter()
-            .enumerate()
-            .map(|(i, k)| (k.as_str(), i))
-            .collect();
-        prompt_paths.sort_by_key(|k| rank.get(k.as_str()).copied().unwrap_or(usize::MAX));
-    }
+    let rank: HashMap<&str, usize> = opts
+        .prompt_order
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect();
+    prompt_paths.sort_by_key(|k| rank.get(k.as_str()).copied().unwrap_or(usize::MAX));
 
     if prompt_paths.is_empty() {
-        if verbose {
+        if opts.verbose {
             eprintln!("No values to prompt for in {}", path.display());
         }
         if !changed {
@@ -514,7 +528,7 @@ fn prompt_and_update_values_file(
     } else {
         for p in prompt_paths {
             let default_value = lookup_yaml_path(&root, &p).cloned();
-            let context = prompt_contexts.get(&p).map(|s| s.as_str());
+            let context = opts.prompt_contexts.get(&p).map(|s| s.as_str());
             let chosen = prompt_for_yaml_key(&p, default_value.as_ref(), context)?;
             let chosen_text = yaml_value_to_string(&chosen)?;
             prompted_values.push((p.clone(), chosen_text));
@@ -536,6 +550,16 @@ fn prompt_and_update_values_file(
             .with_context(|| format!("failed to write values file: {}", path.display()))?;
     }
     Ok(prompted_values)
+}
+
+struct PromptUpdateOptions<'a> {
+    include_environment_vars: bool,
+    skip_existing_env_vars: &'a BTreeSet<String>,
+    existing_os_env_values: &'a HashMap<String, String>,
+    prompt_contexts: &'a HashMap<String, String>,
+    prompt_order: &'a [String],
+    force: bool,
+    verbose: bool,
 }
 
 fn collect_prompt_paths(
@@ -788,19 +812,28 @@ fn shell_escape_single_quoted(value: &str) -> String {
     value.replace('\'', "'\"'\"'")
 }
 
-fn render_eval_exports(prompted_values: &[(String, String)]) -> String {
-    let mut env_map: HashMap<String, String> = HashMap::new();
+fn render_eval_exports_with_env(
+    prompted_values: &[(String, String)],
+    resolved_env_map: &HashMap<String, String>,
+) -> String {
+    let mut export_map: HashMap<String, String> = HashMap::new();
+
     for (key, value) in prompted_values {
         let env_name = values_key_to_env_var(key);
-        env_map.insert(env_name, value.clone());
+        export_map.insert(env_name, value.clone());
     }
 
-    let mut names: Vec<String> = env_map.keys().cloned().collect();
+    // Always export resolved env placeholders in --eval mode, even without --force.
+    for (name, value) in resolved_env_map {
+        export_map.insert(name.clone(), value.clone());
+    }
+
+    let mut names: Vec<String> = export_map.keys().cloned().collect();
     names.sort();
 
     let mut out = String::new();
     for name in names {
-        if let Some(value) = env_map.get(&name) {
+        if let Some(value) = export_map.get(&name) {
             out.push_str(&format!(
                 "export {}='{}'\n",
                 name,
@@ -1463,8 +1496,17 @@ environment:
             ("environment.APP_NAME".to_string(), "demo-app".to_string()),
             ("image.tag".to_string(), "1.2.3".to_string()),
         ];
-        let out = render_eval_exports(&prompted);
+        let out = render_eval_exports_with_env(&prompted, &HashMap::new());
         assert!(out.contains("export APP_NAME='demo-app'"));
+        assert!(out.contains("export IMAGE_TAG='1.2.3'"));
+    }
+
+    #[test]
+    fn render_eval_exports_with_env_always_includes_resolved_env_values() {
+        let prompted = vec![("image.tag".to_string(), "1.2.3".to_string())];
+        let resolved_env = HashMap::from([("IMAGE".to_string(), "repo/app:7".to_string())]);
+        let out = render_eval_exports_with_env(&prompted, &resolved_env);
+        assert!(out.contains("export IMAGE='repo/app:7'"));
         assert!(out.contains("export IMAGE_TAG='1.2.3'"));
     }
 
@@ -1532,11 +1574,11 @@ access_policy:
         let re = placeholder_regex().expect("regex compiles");
 
         let rendered = re.replace_all(input, |caps: &regex::Captures| {
-            if let Some(key) = extract_env_key(caps) {
-                if key == "SIGNER" {
-                    let m = caps.get(0).expect("full match present");
-                    return format_replacement_with_indent(signer, input, m.start(), m.end());
-                }
+            if let Some(key) = extract_env_key(caps)
+                && key == "SIGNER"
+            {
+                let m = caps.get(0).expect("full match present");
+                return format_replacement_with_indent(signer, input, m.start(), m.end());
             }
             caps.get(0)
                 .map(|m| m.as_str().to_string())

@@ -47,7 +47,7 @@ Options:
 - `-o, --output <PATH>`: output file (`-` or omitted means stdout)
 - `-v, --verbose`: print substitutions to stderr
 - `--create-values-file`: ask for missing placeholders and write/update the values file (`$VAR`/`${VAR}` are stored as `environment.VAR`)
-  - In this mode, `environment.VAR` from the values file has priority over OS environment variables.
+  - `environment.VAR` from the values file has priority over OS environment variables.
 - `--force`: only valid with `--create-values-file`; asks for all `.Values.*` placeholders and uses existing values as prompt defaults
 - `--value-file-only`: resolve `{{VARNAME}}` from `environment.VARNAME` in the values file (do not read OS environment variables)
 - `--eval`: only with `--create-values-file`; print prompted keys as bash `export` lines (useful with `eval "$( ... )"`)
@@ -58,6 +58,12 @@ Options:
   - with `--context`, tplenv prints the full paragraph if it contains only that variable; otherwise it prints the matching list entry (`- ...` or numbered item)
 - `-h, --help`: print help
 - `--version`: print version
+
+Environment precedence:
+
+- For env placeholders (`{{VAR}}`, `$VAR`, `${VAR}`), tplenv first checks `environment.VAR` in the values file.
+- If not present, it falls back to the OS environment (unless `--value-file-only` is set).
+- With `--verbose`, tplenv warns when both sources exist and differ, and still uses the values file value.
 
 Notes:
 

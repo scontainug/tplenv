@@ -83,7 +83,7 @@ assert_contains "$EX_DIR/02-create-values/Values.yaml" "environment:"
 assert_contains "$EX_DIR/02-create-values/Values.yaml" "APP_NAME: demo-config"
 
 # 3) Force prompt for all values
-printf 'db.host.local\nforced-db\nforced-pass\nforced-user\nforced-app\nforced-ns\n' | run_tplenv \
+printf 'forced-app\nforced-ns\ndb.host.local\nforced-user\nforced-pass\nforced-db\n' | run_tplenv \
   --file "$EX_DIR/03-force-update/template.yaml" \
   --values-file "$EX_DIR/03-force-update/Values.yaml" \
   --create-values-file \
