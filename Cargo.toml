@@ -1,7 +1,7 @@
 # Cargo.toml
 [package]
 name = "tplenv"
-rersion = "0.9.0"
+version = "0.9.0"
 edition = "2024"
 description = "Render template placeholders from environment variables and YAML values files"
 readme = "README.md"
