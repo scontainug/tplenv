@@ -528,8 +528,17 @@ fn prompt_and_update_values_file(
     } else {
         for p in prompt_paths {
             let default_value = lookup_yaml_path(&root, &p).cloned();
+            let env_fallback = p
+                .strip_prefix("environment.")
+                .and_then(|name| opts.existing_os_env_values.get(name))
+                .cloned();
+            let default_text = default_value
+                .as_ref()
+                .map(yaml_value_to_string)
+                .transpose()?
+                .or(env_fallback);
             let context = opts.prompt_contexts.get(&p).map(|s| s.as_str());
-            let chosen = prompt_for_yaml_key(&p, default_value.as_ref(), context)?;
+            let chosen = prompt_for_yaml_key(&p, default_text.as_deref(), context)?;
             let chosen_text = yaml_value_to_string(&chosen)?;
             prompted_values.push((p.clone(), chosen_text));
             set_yaml_path(&mut root, &p, chosen);
@@ -976,12 +985,11 @@ fn resolve_env_from_values_file(
 
 fn prompt_for_yaml_key(
     path: &str,
-    default: Option<&YamlValue>,
+    default: Option<&str>,
     context: Option<&str>,
 ) -> Result<YamlValue> {
     let mut prompt = format!("Enter value for values file key {path}");
-    if let Some(v) = default {
-        let default_text = yaml_value_to_string(v)?;
+    if let Some(default_text) = default {
         prompt.push_str(&format!(" [{default_text}]"));
     }
     prompt.push_str(": ");
@@ -1001,7 +1009,7 @@ fn prompt_for_yaml_key(
 
     if entered.is_empty() {
         if let Some(v) = default {
-            return Ok(v.clone());
+            return Ok(YamlValue::String(v.to_string()));
         }
         return Ok(YamlValue::String(String::new()));
     }
